@@ -5,25 +5,110 @@
     --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
   }
-
-  body {
-    font-family: var(--font-sans);
-    background-color: #020617; /* slate-950 */
-    color: #f1f5f9; /* slate-100 */
-    min-height: 100vh;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-  }
-
-  /* Light theme overrides when class 'light' is toggled */
-  .light body,
-  .light {
-    background-color: #f8fafc; /* slate-50 */
-    color: #0f172a; /* slate-900 */
-  }
 }
 
-/* Custom dark scrollbars */
+/* ========================================================
+   SISTEMA DE TEMAS: MODO CLARO Y MODO OSCURO
+   ======================================================== */
+
+:root,
+html.dark {
+  --color-slate-50: #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e2e8f0;
+  --color-slate-300: #cbd5e1;
+  --color-slate-400: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-700: #334155;
+  --color-slate-800: #1e293b;
+  --color-slate-900: #0f172a;
+  --color-slate-950: #020617;
+  color-scheme: dark;
+}
+
+html.light {
+  --color-slate-50: #020617;
+  --color-slate-100: #0f172a;
+  --color-slate-200: #1e293b;
+  --color-slate-300: #334155;
+  --color-slate-400: #475569;
+  --color-slate-500: #64748b;
+  --color-slate-600: #94a3b8;
+  --color-slate-700: #cbd5e1;
+  --color-slate-800: #e2e8f0;
+  --color-slate-900: #ffffff;
+  --color-slate-950: #f8fafc;
+  color-scheme: light;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-slate-950);
+  color: var(--color-slate-100);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Ajustes globales de contraste para Modo Claro */
+html.light body {
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+
+html.light .bg-slate-950 {
+  background-color: #f8fafc;
+}
+
+html.light .bg-slate-900 {
+  background-color: #ffffff;
+}
+
+html.light .border-slate-800 {
+  border-color: #e2e8f0;
+}
+
+html.light .border-slate-700 {
+  border-color: #cbd5e1;
+}
+
+/* Evitar que texto en botones slate se vuelva blanco invisible en modo claro */
+html.light .hover\:text-white:hover,
+html.light .group:hover .group-hover\:text-white {
+  color: #0f172a !important;
+}
+
+html.light .bg-slate-800.text-white,
+html.light .bg-slate-800 .text-white {
+  color: #0f172a !important;
+}
+
+/* Modales y backdrops en modo claro */
+html.light .bg-slate-950\/80,
+html.light .bg-slate-950\/70 {
+  background-color: rgba(15, 23, 42, 0.45);
+}
+
+/* Cabecera y Pie de página en modo claro */
+html.light header {
+  background-color: rgba(255, 255, 255, 0.88) !important;
+  border-color: #e2e8f0 !important;
+}
+
+html.light footer {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+}
+
+/* Sombras limpias en modo claro */
+html.light .shadow-lg,
+html.light .shadow-xl {
+  box-shadow: 0 4px 16px -2px rgba(15, 23, 42, 0.08), 0 2px 6px -1px rgba(15, 23, 42, 0.04);
+}
+
+/* Barras de desplazamiento adaptables */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -42,7 +127,15 @@
   background: rgba(148, 163, 184, 0.4);
 }
 
-/* Leaflet map container and clean OSM tiles */
+html.light ::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.25);
+}
+
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.45);
+}
+
+/* Contenedor del mapa Leaflet y popups según tema */
 .leaflet-container {
   font-family: var(--font-sans) !important;
   z-index: 10 !important;
@@ -61,4 +154,16 @@
 .leaflet-popup-tip {
   background: #0f172a !important;
   border: 1px solid #334155 !important;
+}
+
+html.light .leaflet-popup-content-wrapper {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border: 1px solid #cbd5e1 !important;
+  box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.15) !important;
+}
+
+html.light .leaflet-popup-tip {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
 }

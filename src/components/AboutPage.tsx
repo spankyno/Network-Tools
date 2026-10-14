@@ -226,45 +226,6 @@ export const AboutPage: React.FC<AboutPageProps> = ({ onBackToTools, onSelectToo
         </div>
       </div>
 
-      {/* Resumen del Creador y Contacto */}
-      <div className="rounded-xl border border-slate-800 bg-gradient-to-br from-slate-900/80 to-slate-950/80 p-6 sm:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-        <div className="space-y-2 max-w-xl">
-          <h3 className="text-lg font-bold text-slate-100">Desarrollado por Aitor Sánchez Gutiérrez</h3>
-          <p className="text-xs text-slate-400 leading-relaxed">
-            Creado para brindar una suite de herramientas de red abierta, veloz y accesible sin barreras de pago
-            ni anuncios invasivos.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <a
-            href="https://aitorsanchez.pages.dev"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-4 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors inline-flex items-center gap-2"
-          >
-            <span>Blog Personal</span>
-            <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
-          </a>
-          <a
-            href="https://aitorhub.vercel.app"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-4 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors inline-flex items-center gap-2"
-          >
-            <span>Aitor Hub</span>
-            <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
-          </a>
-          <a
-            href="https://aitorsanchez.pages.dev/contacto"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition-colors inline-flex items-center gap-2 shadow-sm shadow-cyan-500/20"
-          >
-            <span>Contacto</span>
-            <ExternalLink className="w-3.5 h-3.5" />
-          </a>
-        </div>
-      </div>
     </div>
   );
 };

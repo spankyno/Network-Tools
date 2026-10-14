@@ -43,16 +43,33 @@ function MainApp() {
   const [currentExtra, setCurrentExtra] = useState<string | undefined>(undefined);
   const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  const [isDark, setIsDark] = useState(true);
+  const [isDark, setIsDark] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('netcheck_theme');
+      if (stored === 'light') return false;
+      if (stored === 'dark') return true;
+      if (window.matchMedia) {
+        return window.matchMedia('(prefers-color-scheme: dark)').matches;
+      }
+    }
+    return true;
+  });
 
-  // Sincronizar clase del tema claro/oscuro
+  // Sincronizar clase del tema claro/oscuro y persistir en almacenamiento local
   useEffect(() => {
+    const root = document.documentElement;
     if (isDark) {
-      document.documentElement.classList.add('dark');
-      document.documentElement.classList.remove('light');
+      root.classList.add('dark');
+      root.classList.remove('light');
+      localStorage.setItem('netcheck_theme', 'dark');
+      const metaTheme = document.querySelector('meta[name="theme-color"]');
+      if (metaTheme) metaTheme.setAttribute('content', '#020617');
     } else {
-      document.documentElement.classList.remove('dark');
-      document.documentElement.classList.add('light');
+      root.classList.remove('dark');
+      root.classList.add('light');
+      localStorage.setItem('netcheck_theme', 'light');
+      const metaTheme = document.querySelector('meta[name="theme-color"]');
+      if (metaTheme) metaTheme.setAttribute('content', '#f8fafc');
     }
   }, [isDark]);
 
@@ -241,75 +258,63 @@ function MainApp() {
         )}
       </main>
 
-      {/* Pie de Página */}
-      <footer className="border-t border-slate-800/80 bg-slate-950/90 py-8 text-xs text-slate-400 mt-auto">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 space-y-6">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-4 pb-6 border-b border-slate-800/60">
-            <div className="flex items-center gap-3">
-              <div className="w-7 h-7 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
-                <Activity className="w-3.5 h-3.5" />
-              </div>
-              <div className="text-left">
-                <span className="font-bold text-slate-200">Network Tools Hub</span>
-                <span className="text-slate-500 block text-[11px]">Plataforma profesional de diagnóstico de redes e infraestructura</span>
-              </div>
-            </div>
-
-            {/* Vínculos de Navegación del Footer */}
-            <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs">
-              <button
-                onClick={() => handleSelectTool('about')}
-                className={`transition-colors hover:text-cyan-400 ${
-                  activeTool === 'about' ? 'text-cyan-400 font-semibold' : 'text-slate-300'
-                }`}
-              >
-                Acerca de...
-              </button>
-              <button
-                onClick={() => handleSelectTool('privacy')}
-                className={`transition-colors hover:text-cyan-400 ${
-                  activeTool === 'privacy' ? 'text-cyan-400 font-semibold' : 'text-slate-300'
-                }`}
-              >
-                Privacidad
-              </button>
-              <a
-                href="https://aitorsanchez.pages.dev"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-slate-300 hover:text-cyan-400 transition-colors inline-flex items-center gap-1"
-              >
-                <span>Blog</span>
-                <ExternalLink className="w-3 h-3 text-slate-500" />
-              </a>
-              <a
-                href="https://aitorhub.vercel.app"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-slate-300 hover:text-cyan-400 transition-colors inline-flex items-center gap-1"
-              >
-                <span>Aitor Hub</span>
-                <ExternalLink className="w-3 h-3 text-slate-500" />
-              </a>
-              <a
-                href="https://aitorsanchez.pages.dev/contacto"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-slate-300 hover:text-cyan-400 transition-colors inline-flex items-center gap-1"
-              >
-                <span>Contacto</span>
-                <ExternalLink className="w-3 h-3 text-slate-500" />
-              </a>
-            </div>
+      {/* Pie de Página Integrado y Recogido */}
+      <footer className="border-t border-slate-800/80 bg-slate-950 py-4 text-xs text-slate-400 mt-auto">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col md:flex-row items-center justify-between gap-3">
+          {/* Marca y Autoría */}
+          <div className="flex flex-wrap items-center justify-center md:justify-start gap-x-2.5 gap-y-1 text-xs text-slate-400">
+            <span className="font-semibold text-slate-200">Network Tools Hub</span>
+            <span className="text-slate-600 hidden sm:inline">·</span>
+            <span>Autor: <strong className="text-slate-200 font-medium">Aitor Sánchez Gutiérrez</strong></span>
+            <span className="text-slate-600 hidden sm:inline">·</span>
+            <span className="text-slate-500">© 2026 Todos los derechos reservados</span>
           </div>
 
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-slate-500">
-            <div>
-              <span>Autor: <strong className="text-slate-300 font-medium">Aitor Sánchez Gutiérrez</strong> (c) 2026 Todos los derechos reservados.</span>
-            </div>
-            <div className="text-center sm:text-right">
-              <span>Privacidad: Página estandar de privacidad. (Se recogerá únicamente la ip del usuario para analíticas.)</span>
-            </div>
+          {/* Vínculos Recogidos */}
+          <div className="flex flex-wrap items-center justify-center md:justify-end gap-x-5 gap-y-1 text-xs">
+            <button
+              onClick={() => handleSelectTool('about')}
+              className={`transition-colors hover:text-cyan-400 ${
+                activeTool === 'about' ? 'text-cyan-400 font-semibold' : 'text-slate-300'
+              }`}
+            >
+              Acerca de...
+            </button>
+            <button
+              onClick={() => handleSelectTool('privacy')}
+              className={`transition-colors hover:text-cyan-400 ${
+                activeTool === 'privacy' ? 'text-cyan-400 font-semibold' : 'text-slate-300'
+              }`}
+            >
+              Privacidad
+            </button>
+            <a
+              href="https://aitorsanchez.pages.dev"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-slate-300 hover:text-cyan-400 transition-colors inline-flex items-center gap-1"
+            >
+              <span>Blog</span>
+              <ExternalLink className="w-3 h-3 text-slate-500" />
+            </a>
+            <a
+              href="https://aitorhub.vercel.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-slate-300 hover:text-cyan-400 transition-colors inline-flex items-center gap-1"
+            >
+              <span>Aitor Hub</span>
+              <ExternalLink className="w-3 h-3 text-slate-500" />
+            </a>
+            <a
+              href="https://aitorsanchez.pages.dev/contacto"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-slate-300 hover:text-cyan-400 transition-colors inline-flex items-center gap-1"
+            >
+              <span>Contacto</span>
+              <ExternalLink className="w-3 h-3 text-slate-500" />
+            </a>
           </div>
         </div>
       </footer>

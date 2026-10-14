@@ -111,11 +111,15 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Selector de Modo Claro/Oscuro */}
           <button
             onClick={onToggleTheme}
-            className="p-2 rounded-lg border border-slate-800 bg-slate-900/60 hover:bg-slate-800/80 text-slate-300 hover:text-white transition-colors"
+            className="p-2 rounded-lg border border-slate-800 bg-slate-900/60 hover:bg-slate-800/80 text-slate-300 hover:text-slate-100 transition-colors"
             title={isDark ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
             aria-label="Alternar tema"
           >
-            {isDark ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-400" />}
+            {isDark ? (
+              <Sun className="w-4 h-4 text-amber-400" />
+            ) : (
+              <Moon className="w-4 h-4 text-indigo-600" />
+            )}
           </button>
         </div>
       </div>
