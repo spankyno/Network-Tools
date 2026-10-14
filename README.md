@@ -31,14 +31,14 @@ En la pantalla de configuración del proyecto, introduce los siguientes valores 
 
 ---
 
-### Paso 3: Variables de Entorno (Importante)
-Despliega la sección **Environment variables** (Avanzado) y añade:
+### Paso 3: Versión de Node.js
+El repositorio ya incluye los archivos `.node-version`, `.nvmrc` y `.npmrc` configurados en Node.js 22. Si deseas asegurarte manualmente en la sección **Environment variables**, puedes añadir:
 
 | Variable | Valor |
 | :--- | :--- |
-| `NODE_VERSION` | `20` |
+| `NODE_VERSION` | `22` |
 
-*(Esto garantiza que Cloudflare utilice Node.js 20 LTS moderno con soporte completo para Tailwind CSS v4 y Vite 6/8).*
+*(Esto garantiza que Cloudflare utilice Node.js 22 LTS con soporte nativo para Vite 8 y Tailwind CSS v4).*
 
 ---
 
