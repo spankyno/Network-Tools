@@ -504,7 +504,8 @@ app.get('/api/dnssec', async (req: Request, res: Response) => {
 // Proveedores: ip-api.com -> ipwho.is -> ipapi.co
 // -------------------------------------------------------------
 app.get('/api/ip', async (req: Request, res: Response) => {
-  let target = (req.query.ip as string || '').trim();
+  let rawTarget = (req.query.ip as string || '').trim();
+  let target = cleanHost(rawTarget).replace(/:\d+$/, '');
 
   // Si no se especifica IP o es "me", obtener del encabezado
   if (!target || target === 'me' || target === 'self') {
