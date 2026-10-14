@@ -1,20 +1,77 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Network Tools Hub (NetCheck)
 
-# Run and deploy your AI Studio app
+Suite profesional de diagnóstico de redes e infraestructura web construida con React 19, TypeScript, Tailwind CSS v4, TanStack Query y Leaflet + OpenStreetMap. Opera 100% en planes gratuitos (*free tier*) de Cloudflare Pages y APIs públicas abiertas.
 
-This contains everything you need to run your app locally.
+---
 
-View your app in AI Studio: https://ai.studio/apps/a954867c-57a5-4775-92db-0c6dbe50f8f3
+## 🚀 Despliegue en Cloudflare Pages desde GitHub
 
-## Run Locally
+Sigue estos sencillos pasos para compilar y desplegar la aplicación directamente desde tu repositorio de GitHub:
 
-**Prerequisites:**  Node.js
+### Paso 1: Conectar el repositorio en Cloudflare
+1. Entra a tu panel de control de Cloudflare: [dash.cloudflare.com](https://dash.cloudflare.com/).
+2. En el menú lateral izquierdo, haz clic en **Workers & Pages** (o **Pages**).
+3. Haz clic en el botón azul **Create application** (Crear aplicación).
+4. Selecciona la pestaña **Pages** y haz clic en **Connect to Git** (Conectar a Git).
+5. Autoriza tu cuenta de GitHub (si aún no lo has hecho) y selecciona el repositorio de Network Tools Hub.
 
+---
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+### Paso 2: Configuración de Build (Ajustes de compilación)
+En la pantalla de configuración del proyecto, introduce los siguientes valores exactos:
+
+| Parámetro | Valor |
+| :--- | :--- |
+| **Project name** | `network-tools-hub` (o el nombre que prefieras) |
+| **Production branch** | `main` (o tu rama principal) |
+| **Framework preset** | `Vite` |
+| **Build command** | `npm run build` |
+| **Build output directory** | `dist` |
+| **Root directory** | `/` (o dejar vacío) |
+
+---
+
+### Paso 3: Variables de Entorno (Importante)
+Despliega la sección **Environment variables** (Avanzado) y añade:
+
+| Variable | Valor |
+| :--- | :--- |
+| `NODE_VERSION` | `20` |
+
+*(Esto garantiza que Cloudflare utilice Node.js 20 LTS moderno con soporte completo para Tailwind CSS v4 y Vite 6/8).*
+
+---
+
+### Paso 4: Desplegar
+1. Haz clic en **Save and Deploy** (Guardar y Desplegar).
+2. Cloudflare Pages iniciará la compilación de forma automática:
+   - Compilará la interfaz web con `npm run build` en el directorio `dist/`.
+   - Compilará y desplegará de forma automática las rutas `/api/*` como **Cloudflare Pages Functions** (definidas en el directorio `functions/`).
+   - Copiará el archivo `_redirects` para que el enrutamiento SPA funcione perfectamente sin errores 404.
+3. Al finalizar obtendrás una URL gratuita del tipo: `https://network-tools-hub.pages.dev`.
+
+---
+
+### Paso 5 (Opcional): Dominio Personalizado Gratuito
+1. En tu proyecto de Cloudflare Pages, entra en la pestaña **Custom domains**.
+2. Haz clic en **Set up a custom domain**.
+3. Escribe tu dominio (ej. `tools.tudominio.com` o `tudominio.com`).
+4. Cloudflare configurará automáticamente los registros DNS y aprovisionará el certificado SSL/TLS de forma 100% gratuita.
+
+---
+
+## 🛠️ Desarrollo Local
+
+```bash
+# Instalar dependencias
+npm install
+
+# Iniciar servidor local de desarrollo (Express + Vite + APIs completas)
+npm run dev
+
+# Compilar para producción
+npm run build
+
+# Comprobación de tipos TypeScript
+npm run lint
+```
