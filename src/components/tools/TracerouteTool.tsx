@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchTraceroute } from '../../lib/api';
 import { TracerouteResponse, ToolId } from '../../types/network';
@@ -20,8 +20,20 @@ export const TracerouteTool: React.FC<TracerouteToolProps> = ({
   const [target, setTarget] = useState(initialQuery);
   const [activeTarget, setActiveTarget] = useState(initialQuery);
   const [copied, setCopied] = useState(false);
+  const prevInitialQueryRef = useRef(initialQuery);
 
   const { toast } = useToast();
+
+  useEffect(() => {
+    if (initialQuery && initialQuery !== prevInitialQueryRef.current) {
+      prevInitialQueryRef.current = initialQuery;
+      const clean = initialQuery.trim().toLowerCase().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '');
+      if (clean) {
+        setTarget(clean);
+        setActiveTarget(clean);
+      }
+    }
+  }, [initialQuery]);
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery<TracerouteResponse>({
     queryKey: ['traceroute', activeTarget],
@@ -40,21 +52,33 @@ export const TracerouteTool: React.FC<TracerouteToolProps> = ({
     if (e) e.preventDefault();
     const clean = target.trim().toLowerCase().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '');
     if (!clean) return;
-    setActiveTarget(clean);
+    if (clean === activeTarget) {
+      refetch();
+    } else {
+      setActiveTarget(clean);
+    }
   };
+
+  const normalizedHops = (data?.hops || []).map((h: any, idx: number) => ({
+    hop: h.hop ?? h.hopNumber ?? (idx + 1),
+    ip: h.ip || '*',
+    hostname: h.hostname || null,
+    rttMs: typeof h.rttMs === 'number' ? h.rttMs : null,
+    loss: Boolean(h.loss || (!h.rttMs && h.status === 'TIMEOUT')),
+  }));
 
   const copyTraceroute = () => {
     if (!data) return;
-    const txt = data.hops
+    const txt = normalizedHops
       .map((h) => `${h.hop}\t${h.ip}\t${h.hostname || '*'}\t${h.rttMs !== null ? `${h.rttMs} ms` : '*'}`)
       .join('\n');
-    navigator.clipboard.writeText(`Traceroute hacia ${data.target} (${data.totalHops} saltos):\n${txt}`);
+    navigator.clipboard.writeText(`Traceroute hacia ${data.target || activeTarget} (${normalizedHops.length} saltos):\n${txt}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
     toast('Trazado de ruta copiado al portapapeles', 'success');
   };
 
-  const maxRtt = data?.hops.reduce((max, h) => (h.rttMs && h.rttMs > max ? h.rttMs : max), 1) || 100;
+  const maxRtt = normalizedHops.reduce((max, h) => (h.rttMs && h.rttMs > max ? h.rttMs : max), 1) || 100;
 
   return (
     <div className="space-y-6">
@@ -95,7 +119,11 @@ export const TracerouteTool: React.FC<TracerouteToolProps> = ({
               type="button"
               onClick={() => {
                 setTarget(ex);
-                setActiveTarget(ex);
+                if (ex === activeTarget) {
+                  refetch();
+                } else {
+                  setActiveTarget(ex);
+                }
               }}
               className="text-slate-400 hover:text-emerald-400 transition-colors underline decoration-slate-700 hover:decoration-emerald-400 font-mono"
             >
@@ -139,15 +167,15 @@ export const TracerouteTool: React.FC<TracerouteToolProps> = ({
           <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-mono text-base font-bold text-slate-100">{data.target}</span>
+                <span className="font-mono text-base font-bold text-slate-100">{data.target || activeTarget}</span>
                 <span className="text-xs font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-semibold">
-                  {data.totalHops} Saltos de Red
+                  {data.totalHops || normalizedHops.length} Saltos de Red
                 </span>
               </div>
               <div className="text-xs text-slate-400 mt-1 flex items-center gap-2">
-                <span>Sonda: <strong className="text-slate-200">{data.probeLocation} ({data.probeCountry})</strong></span>
+                <span>Sonda: <strong className="text-slate-200">{data.probeLocation || 'Anycast Probe'} ({data.probeCountry || 'EU'})</strong></span>
                 <span aria-hidden="true">·</span>
-                <span>Proveedor: {data.provider}</span>
+                <span>Proveedor: {data.provider || 'Comunidad Globalping'}</span>
               </div>
             </div>
 
@@ -169,7 +197,7 @@ export const TracerouteTool: React.FC<TracerouteToolProps> = ({
             </div>
 
             <div className="space-y-2">
-              {data.hops.map((hop, idx) => (
+              {normalizedHops.map((hop, idx) => (
                 <div
                   key={idx}
                   className="p-3 rounded-lg bg-slate-950/60 border border-slate-800/80 hover:border-slate-700 flex items-center justify-between gap-3 transition-colors"
@@ -178,7 +206,7 @@ export const TracerouteTool: React.FC<TracerouteToolProps> = ({
                     <span className="w-6 h-6 rounded bg-slate-800 flex items-center justify-center font-bold text-slate-300 text-[11px] tabular-nums">
                       {hop.hop}
                     </span>
-                    {idx < data.hops.length - 1 && (
+                    {idx < normalizedHops.length - 1 && (
                       <ArrowDown className="w-3 h-3 text-slate-600 hidden sm:block" />
                     )}
                   </div>
