@@ -46,9 +46,12 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
 
   const { toast } = useToast();
 
-  // Sincronizar initialQuery si cambia desde el exterior (ej. historial)
+  // Sincronizar initialQuery SOLO cuando cambia desde el exterior (ej. clic en historial),
+  // evitando que re-renders de componentes padres reinicien búsquedas locales del usuario.
+  const prevInitialQueryRef = useRef(initialQuery);
   useEffect(() => {
-    if (initialQuery !== undefined && initialQuery !== activeQuery) {
+    if (initialQuery !== undefined && initialQuery !== prevInitialQueryRef.current) {
+      prevInitialQueryRef.current = initialQuery;
       setIpInput(initialQuery);
       setActiveQuery(initialQuery);
     }
@@ -70,12 +73,20 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
   const handleSearch = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const query = ipInput.trim();
-    setActiveQuery(query);
+    if (query === activeQuery) {
+      refetch();
+    } else {
+      setActiveQuery(query);
+    }
   };
 
   const handleMyIp = () => {
     setIpInput('');
-    setActiveQuery('');
+    if (activeQuery === '') {
+      refetch();
+    } else {
+      setActiveQuery('');
+    }
   };
 
   const copyDetails = () => {
@@ -137,14 +148,18 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
   const renderMap = useCallback(() => {
     if (!data || !mapContainerRef.current) return;
 
-    const lat = typeof data.lat === 'number' && !isNaN(data.lat) ? data.lat : 0;
-    const lon = typeof data.lon === 'number' && !isNaN(data.lon) ? data.lon : 0;
+    const rawLat = typeof data.lat === 'number' ? data.lat : parseFloat(String(data.lat || 0));
+    const rawLon = typeof data.lon === 'number' ? data.lon : parseFloat(String(data.lon || 0));
+    const lat = !isNaN(rawLat) ? rawLat : 0;
+    const lon = !isNaN(rawLon) ? rawLon : 0;
 
-    // Pin de localización nítido en SVG para Leaflet (sin dependencia de imágenes externas que fallen)
+    const isZeroCoords = Math.abs(lat) < 0.0001 && Math.abs(lon) < 0.0001;
+
+    // Pin de localización nítido en SVG para Leaflet con anchor exacto en la punta inferior
     const customPinIcon = L.divIcon({
       className: 'custom-osm-pin',
       html: `
-        <div style="position: relative; width: 32px; height: 38px; transform: translate(-50%, -100%);">
+        <div style="position: relative; width: 32px; height: 36px;">
           <!-- Sombra base -->
           <div style="position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); width: 14px; height: 6px; background: rgba(0,0,0,0.35); border-radius: 50%; filter: blur(1.5px);"></div>
           <!-- Marcador Pin SVG -->
@@ -156,24 +171,24 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
           </svg>
         </div>
       `,
-      iconSize: [32, 38],
-      iconAnchor: [0, 0],
+      iconSize: [32, 36],
+      iconAnchor: [16, 36],
       popupAnchor: [0, -36],
     });
 
     const popupHtml = `
       <div style="padding: 4px 2px; min-width: 170px;">
         <div style="font-weight: 700; font-size: 13px; color: #f8fafc; margin-bottom: 3px;">
-          ${data.city || 'Ubicación'}, ${data.country}
+          ${data.city || 'Ubicación'}${data.country ? `, ${data.country}` : ''}
         </div>
         <div style="font-family: monospace; font-size: 12px; color: #38bdf8; margin-bottom: 2px;">
-          ${data.ip} (${data.version})
+          ${data.ip} (${data.version || 'IPv4'})
         </div>
         <div style="font-size: 11px; color: #94a3b8;">
           ${data.isp || data.org || ''}
         </div>
         <div style="font-family: monospace; font-size: 10px; color: #64748b; margin-top: 4px; border-top: 1px solid #334155; padding-top: 3px;">
-          ${lat.toFixed(4)}, ${lon.toFixed(4)}
+          ${!isZeroCoords ? `${lat.toFixed(4)}, ${lon.toFixed(4)}` : 'Ubicación regional'}
         </div>
       </div>
     `;
@@ -209,7 +224,7 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
       if (!mapInstanceRef.current && mapContainerRef.current) {
         const map = L.map(mapContainerRef.current, {
           center: [lat, lon],
-          zoom: lat === 0 && lon === 0 ? 3 : 12,
+          zoom: isZeroCoords ? 3 : 12,
           zoomControl: false,
           attributionControl: true,
           scrollWheelZoom: true,
@@ -236,12 +251,13 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
       } else if (mapInstanceRef.current) {
         // 4. Si el mapa ya existe y está activo, actualizar coordenadas suavemente
         const map = mapInstanceRef.current;
-        const targetZoom = lat === 0 && lon === 0 ? 3 : 12;
+        const targetZoom = isZeroCoords ? 3 : 12;
 
         map.setView([lat, lon], targetZoom, { animate: true });
 
         if (markerRef.current) {
           markerRef.current.setLatLng([lat, lon]);
+          markerRef.current.setIcon(customPinIcon);
           markerRef.current.setPopupContent(popupHtml).openPopup();
         } else {
           const marker = L.marker([lat, lon], { icon: customPinIcon }).addTo(map);
@@ -305,8 +321,13 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
   }, []);
 
   const handleCenterMap = () => {
-    if (mapInstanceRef.current && data && typeof data.lat === 'number' && typeof data.lon === 'number') {
-      mapInstanceRef.current.setView([data.lat, data.lon], 12, { animate: true });
+    if (mapInstanceRef.current && data) {
+      const rawLat = typeof data.lat === 'number' ? data.lat : parseFloat(String(data.lat || 0));
+      const rawLon = typeof data.lon === 'number' ? data.lon : parseFloat(String(data.lon || 0));
+      const lat = !isNaN(rawLat) ? rawLat : 0;
+      const lon = !isNaN(rawLon) ? rawLon : 0;
+      const isZeroCoords = Math.abs(lat) < 0.0001 && Math.abs(lon) < 0.0001;
+      mapInstanceRef.current.setView([lat, lon], isZeroCoords ? 3 : 12, { animate: true });
       markerRef.current?.openPopup();
       mapInstanceRef.current.invalidateSize();
     }
@@ -361,7 +382,11 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
               type="button"
               onClick={() => {
                 setIpInput(ex);
-                setActiveQuery(ex);
+                if (ex === activeQuery) {
+                  refetch();
+                } else {
+                  setActiveQuery(ex);
+                }
               }}
               className="text-slate-400 hover:text-violet-400 transition-colors underline decoration-slate-700 hover:decoration-violet-400 font-mono"
             >
@@ -464,8 +489,14 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
                   <div>
                     <span className="text-slate-500 block mb-0.5">Latitud / Longitud</span>
                     <span className="text-slate-200 font-mono tabular-nums">
-                      {typeof data.lat === 'number' ? data.lat.toFixed(4) : '0.0000'},{' '}
-                      {typeof data.lon === 'number' ? data.lon.toFixed(4) : '0.0000'}
+                      {(() => {
+                        const rawLat = typeof data.lat === 'number' ? data.lat : parseFloat(String(data.lat || 0));
+                        const rawLon = typeof data.lon === 'number' ? data.lon : parseFloat(String(data.lon || 0));
+                        if (!isNaN(rawLat) && !isNaN(rawLon) && (rawLat !== 0 || rawLon !== 0)) {
+                          return `${rawLat.toFixed(4)}, ${rawLon.toFixed(4)}`;
+                        }
+                        return 'Ubicación regional';
+                      })()}
                     </span>
                   </div>
                   <div>
@@ -606,8 +637,14 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
 
                   {/* Badge inferior con coordenadas */}
                   <div className="absolute bottom-2 left-2 z-[500] px-2 py-1 rounded bg-slate-900/90 backdrop-blur-sm border border-slate-800 text-[10px] font-mono text-slate-300 pointer-events-none shadow">
-                    Coordenadas: {typeof data.lat === 'number' ? data.lat.toFixed(4) : '0'},{' '}
-                    {typeof data.lon === 'number' ? data.lon.toFixed(4) : '0'}
+                    {(() => {
+                      const rawLat = typeof data.lat === 'number' ? data.lat : parseFloat(String(data.lat || 0));
+                      const rawLon = typeof data.lon === 'number' ? data.lon : parseFloat(String(data.lon || 0));
+                      if (!isNaN(rawLat) && !isNaN(rawLon) && (rawLat !== 0 || rawLon !== 0)) {
+                        return `Coordenadas: ${rawLat.toFixed(4)}, ${rawLon.toFixed(4)}`;
+                      }
+                      return 'Ubicación regional aproximada';
+                    })()}
                   </div>
                 </div>
               </div>
