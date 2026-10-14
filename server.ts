@@ -1038,6 +1038,26 @@ app.get('/api/http-versions', (req: Request, res: Response) => {
         // Ignorar si HEAD falla
       }
 
+      // Probar registros DNS HTTPS para confirmación ALPN h3 / h2
+      try {
+        const dohResp = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=HTTPS`, {
+          headers: { 'Accept': 'application/dns-json' },
+          signal: AbortSignal.timeout(3000),
+        });
+        if (dohResp.ok) {
+          const dohData: any = await dohResp.json();
+          const answers = dohData.Answer || [];
+          for (const ans of answers) {
+            const dataStr = String(ans.data || '');
+            if (dataStr.includes('h3')) {
+              hasHttp3 = true;
+            }
+          }
+        }
+      } catch {
+        // Ignorar fallo de DoH
+      }
+
       const supportsHttp1 = true;
       const supportsHttp2 = alpnProtocol === 'h2';
 
