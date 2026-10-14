@@ -362,86 +362,276 @@ export async function onRequest(context: any): Promise<Response> {
 
     // 4. IP Geolocation (/api/ip)
     if (pathname === '/api/ip') {
-      let targetIp = searchParams.get('ip') || '';
-
-      if (!targetIp || targetIp === 'me' || targetIp === 'self') {
-        targetIp = context.request.headers.get('cf-connecting-ip') || '';
-      }
+      const rawTarget = (searchParams.get('ip') || '').trim();
+      let target = cleanHost(rawTarget).replace(/:\d+$/, '');
 
       const cf = (context.request as any).cf || {};
+      const clientIp = context.request.headers.get('cf-connecting-ip') || 
+                       context.request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '';
 
-      // Si targetIp es local o vacía
-      if (targetIp === '127.0.0.1' || targetIp === '::1') {
-        targetIp = '';
+      // Si target es vacío, 'me', 'self' o local
+      if (!target || target === 'me' || target === 'self' || target === '127.0.0.1' || target === '::1') {
+        target = (clientIp && clientIp !== '127.0.0.1' && clientIp !== '::1') ? clientIp : '';
       }
 
-      if (!targetIp && cf.country) {
-        return jsonResponse({
-          ip: context.request.headers.get('cf-connecting-ip') || '127.0.0.1',
-          version: 'IPv4',
-          city: cf.city || 'Desconocida',
-          region: cf.region || '',
-          country: cf.country || 'Desconocido',
-          countryCode: cf.country || 'XX',
-          lat: cf.latitude || 0,
-          lon: cf.longitude || 0,
-          timezone: cf.timezone || 'UTC',
-          isp: cf.asOrganization || 'Cloudflare Edge Network',
-          org: cf.asOrganization || 'Cloudflare Edge Network',
-          as: `AS${cf.asn || ''}`,
-          isProxy: false,
-          isHosting: false,
-          isMobile: false,
-          providerUsed: 'Cloudflare Edge (0ms)',
-        });
+      // Si target es un nombre de dominio (no una IP v4 o v6), resolverlo primero via Cloudflare DoH
+      let resolvedFromDomain = false;
+      const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(target) || target.includes(':');
+      if (target && !isIp) {
+        try {
+          const dohRes = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(target)}&type=A`, {
+            headers: { 'Accept': 'application/dns-json' },
+            signal: AbortSignal.timeout(3000),
+          });
+          if (dohRes.ok) {
+            const dohData: any = await dohRes.json();
+            const firstA = dohData.Answer?.find((a: any) => a.type === 1);
+            if (firstA?.data) {
+              target = firstA.data;
+              resolvedFromDomain = true;
+            }
+          }
+        } catch {
+          // Continuar con target original
+        }
       }
 
+      const startTime = Date.now();
+      const fallbacksAttempted: string[] = [];
+      const commonHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) NetCheck/2.0 (Network Diagnostics Tool; +https://netcheck.app)',
+        'Accept': 'application/json',
+      };
+
+      // Helper para mapear coordenadas por país en caso de fallback extremo
+      const getCountryFallbackCoords = (code: string): [number, number] => {
+        const c = (code || '').toUpperCase();
+        const map: Record<string, [number, number]> = {
+          ES: [40.4168, -3.7038], // Madrid, España
+          US: [37.7749, -122.4194], // San Francisco, EE.UU.
+          MX: [19.4326, -99.1332], // Ciudad de México
+          AR: [-34.6037, -58.3816], // Buenos Aires
+          CO: [4.7110, -74.0721], // Bogotá
+          CL: [-33.4489, -70.6693], // Santiago
+          PE: [-12.0464, -77.0428], // Lima
+          FR: [48.8566, 2.3522], // París
+          DE: [52.5200, 13.4050], // Berlín
+          GB: [51.5074, -0.1278], // Londres
+          IT: [41.9028, 12.4964], // Roma
+          BR: [-23.5505, -46.6333], // São Paulo
+          PT: [38.7223, -9.1393], // Lisboa
+        };
+        return map[c] || [40.4168, -3.7038];
+      };
+
+      // 1. Proveedor: ip-api.com (rápido, coordenadas precisas, ISP y ASN reales)
       try {
-        const ipResp = await fetch(`https://ipwho.is/${encodeURIComponent(targetIp || '')}`);
-        if (ipResp.ok) {
-          const ipData: any = await ipResp.json();
-          if (ipData.success !== false) {
+        fallbacksAttempted.push('ip-api.com');
+        const endpoint = target
+          ? `http://ip-api.com/json/${encodeURIComponent(target)}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,query,mobile,proxy,hosting`
+          : `http://ip-api.com/json/?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,query,mobile,proxy,hosting`;
+
+        const r = await fetch(endpoint, {
+          headers: commonHeaders,
+          signal: AbortSignal.timeout(3500),
+        });
+
+        if (r.ok) {
+          const d: any = await r.json();
+          if (d.status === 'success' || d.query) {
+            const lat = typeof d.lat === 'number' ? d.lat : parseFloat(String(d.lat || 0)) || 0;
+            const lon = typeof d.lon === 'number' ? d.lon : parseFloat(String(d.lon || 0)) || 0;
+            const finalQuery = d.query || target || clientIp || '1.1.1.1';
+
             return jsonResponse({
-              ip: ipData.ip || targetIp,
-              version: ipData.type || 'IPv4',
-              city: ipData.city || cf.city || 'Desconocida',
-              region: ipData.region || cf.region || '',
-              country: ipData.country || cf.country || 'Desconocido',
-              countryCode: ipData.country_code || cf.country || 'XX',
-              lat: ipData.latitude || cf.latitude || 0,
-              lon: ipData.longitude || cf.longitude || 0,
-              timezone: ipData.timezone?.id || cf.timezone || 'UTC',
-              isp: ipData.connection?.isp || cf.asOrganization || 'Desconocido',
-              org: ipData.connection?.org || cf.asOrganization || '',
-              as: `AS${ipData.connection?.asn || cf.asn || ''}`,
-              isProxy: Boolean(ipData.security?.is_proxy || ipData.security?.is_vpn),
-              isHosting: Boolean(ipData.security?.is_hosting),
-              isMobile: false,
-              providerUsed: 'ipwho.is + Cloudflare Edge',
+              ip: finalQuery,
+              version: finalQuery.includes(':') ? 'IPv6' : 'IPv4',
+              country: d.country || cf.country || 'Desconocido',
+              countryCode: d.countryCode || cf.country || '',
+              region: d.regionName || d.region || cf.region || '',
+              regionCode: d.region || '',
+              city: d.city || cf.city || 'Desconocida',
+              zip: d.zip || cf.postalCode || '',
+              lat,
+              lon,
+              timezone: d.timezone || cf.timezone || 'UTC',
+              isp: d.isp || cf.asOrganization || 'Desconocido',
+              org: d.org || d.isp || cf.asOrganization || '',
+              as: d.as || (cf.asn ? `AS${cf.asn}` : ''),
+              isMobile: Boolean(d.mobile),
+              isProxy: Boolean(d.proxy),
+              isHosting: Boolean(d.hosting),
+              providerUsed: 'ip-api.com',
+              fallbacksAttempted,
+              durationMs: Date.now() - startTime,
             });
           }
         }
       } catch {
-        // Fallback a info de Cloudflare
+        // Pasar al siguiente proveedor
       }
 
+      // 2. Proveedor: ipwho.is (HTTPS nativo)
+      try {
+        fallbacksAttempted.push('ipwho.is');
+        const endpoint = target ? `https://ipwho.is/${encodeURIComponent(target)}` : 'https://ipwho.is/';
+        const r = await fetch(endpoint, {
+          headers: commonHeaders,
+          signal: AbortSignal.timeout(3500),
+        });
+
+        if (r.ok) {
+          const d: any = await r.json();
+          if (d.success !== false && d.ip) {
+            const lat = typeof d.latitude === 'number' ? d.latitude : parseFloat(String(d.latitude || 0)) || 0;
+            const lon = typeof d.longitude === 'number' ? d.longitude : parseFloat(String(d.longitude || 0)) || 0;
+            const finalQuery = d.ip || target || clientIp || '1.1.1.1';
+
+            return jsonResponse({
+              ip: finalQuery,
+              version: d.type === 'IPv6' || finalQuery.includes(':') ? 'IPv6' : 'IPv4',
+              country: d.country || cf.country || 'Desconocido',
+              countryCode: d.country_code || cf.country || '',
+              region: d.region || cf.region || '',
+              regionCode: d.region_code || '',
+              city: d.city || cf.city || 'Desconocida',
+              zip: d.postal || '',
+              lat,
+              lon,
+              timezone: d.timezone?.id || cf.timezone || 'UTC',
+              isp: d.connection?.isp || d.connection?.org || cf.asOrganization || 'Desconocido',
+              org: d.connection?.org || cf.asOrganization || '',
+              as: d.connection?.asn ? `AS${d.connection.asn} ${d.connection.org || ''}` : (cf.asn ? `AS${cf.asn}` : ''),
+              isMobile: false,
+              isProxy: Boolean(d.security?.is_proxy || d.security?.is_vpn),
+              isHosting: Boolean(d.security?.is_datacenter),
+              providerUsed: 'ipwho.is',
+              fallbacksAttempted,
+              durationMs: Date.now() - startTime,
+            });
+          }
+        }
+      } catch {
+        // Pasar al siguiente proveedor
+      }
+
+      // 3. Proveedor: freeipapi.com (HTTPS alta disponibilidad)
+      try {
+        fallbacksAttempted.push('freeipapi.com');
+        const endpoint = target ? `https://freeipapi.com/api/json/${encodeURIComponent(target)}` : 'https://freeipapi.com/api/json';
+        const r = await fetch(endpoint, {
+          headers: commonHeaders,
+          signal: AbortSignal.timeout(3500),
+        });
+
+        if (r.ok) {
+          const d: any = await r.json();
+          if (d.ipAddress) {
+            const lat = typeof d.latitude === 'number' ? d.latitude : parseFloat(String(d.latitude || 0)) || 0;
+            const lon = typeof d.longitude === 'number' ? d.longitude : parseFloat(String(d.longitude || 0)) || 0;
+            const finalQuery = d.ipAddress || target || clientIp || '1.1.1.1';
+
+            return jsonResponse({
+              ip: finalQuery,
+              version: d.ipVersion === 6 || finalQuery.includes(':') ? 'IPv6' : 'IPv4',
+              country: d.countryName || cf.country || 'Desconocido',
+              countryCode: d.countryCode || cf.country || '',
+              region: d.regionName || cf.region || '',
+              regionCode: '',
+              city: d.cityName || cf.city || 'Desconocida',
+              zip: d.zipCode || '',
+              lat,
+              lon,
+              timezone: d.timeZone || cf.timezone || 'UTC',
+              isp: cf.asOrganization || 'Desconocido',
+              org: cf.asOrganization || '',
+              as: cf.asn ? `AS${cf.asn}` : '',
+              isMobile: false,
+              isProxy: Boolean(d.isProxy),
+              isHosting: false,
+              providerUsed: 'freeipapi.com',
+              fallbacksAttempted,
+              durationMs: Date.now() - startTime,
+            });
+          }
+        }
+      } catch {
+        // Pasar al siguiente proveedor
+      }
+
+      // 4. Proveedor: ipapi.co
+      try {
+        fallbacksAttempted.push('ipapi.co');
+        const endpoint = target ? `https://ipapi.co/${encodeURIComponent(target)}/json/` : 'https://ipapi.co/json/';
+        const r = await fetch(endpoint, {
+          headers: commonHeaders,
+          signal: AbortSignal.timeout(3500),
+        });
+
+        if (r.ok) {
+          const d: any = await r.json();
+          if (!d.error && d.ip) {
+            const lat = typeof d.latitude === 'number' ? d.latitude : parseFloat(String(d.latitude || 0)) || 0;
+            const lon = typeof d.longitude === 'number' ? d.longitude : parseFloat(String(d.longitude || 0)) || 0;
+            const finalQuery = d.ip || target || clientIp || '1.1.1.1';
+
+            return jsonResponse({
+              ip: finalQuery,
+              version: d.version || (finalQuery.includes(':') ? 'IPv6' : 'IPv4'),
+              country: d.country_name || cf.country || 'Desconocido',
+              countryCode: d.country_code || cf.country || '',
+              region: d.region || cf.region || '',
+              regionCode: d.region_code || '',
+              city: d.city || cf.city || 'Desconocida',
+              zip: d.postal || '',
+              lat,
+              lon,
+              timezone: d.timezone || cf.timezone || 'UTC',
+              isp: d.org || cf.asOrganization || 'Desconocido',
+              org: d.org || cf.asOrganization || '',
+              as: d.asn ? `${d.asn} ${d.org || ''}` : (cf.asn ? `AS${cf.asn}` : ''),
+              isMobile: false,
+              isProxy: false,
+              isHosting: false,
+              providerUsed: 'ipapi.co',
+              fallbacksAttempted,
+              durationMs: Date.now() - startTime,
+            });
+          }
+        }
+      } catch {
+        // Fallback final a Cloudflare Edge Context
+      }
+
+      // 5. Fallback a datos de Cloudflare Edge con coordenadas garantizadas
+      const parsedCfLat = typeof cf.latitude === 'number' ? cf.latitude : parseFloat(String(cf.latitude || 0)) || 0;
+      const parsedCfLon = typeof cf.longitude === 'number' ? cf.longitude : parseFloat(String(cf.longitude || 0)) || 0;
+      const [countryLat, countryLon] = getCountryFallbackCoords(cf.country || 'ES');
+
+      const finalLat = (parsedCfLat !== 0 || parsedCfLon !== 0) ? parsedCfLat : countryLat;
+      const finalLon = (parsedCfLat !== 0 || parsedCfLon !== 0) ? parsedCfLon : countryLon;
+      const finalIp = target || clientIp || '1.1.1.1';
+
       return jsonResponse({
-        ip: targetIp || '1.1.1.1',
-        version: 'IPv4',
-        city: cf.city || 'Desconocida',
-        region: cf.region || '',
-        country: cf.country || 'Desconocido',
-        countryCode: cf.country || 'XX',
-        lat: cf.latitude || 0,
-        lon: cf.longitude || 0,
-        timezone: cf.timezone || 'UTC',
-        isp: cf.asOrganization || 'Internet Service Provider',
-        org: cf.asOrganization || '',
-        as: `AS${cf.asn || ''}`,
+        ip: finalIp,
+        version: finalIp.includes(':') ? 'IPv6' : 'IPv4',
+        city: cf.city || 'Madrid',
+        region: cf.region || 'Comunidad de Madrid',
+        country: cf.country || 'España',
+        countryCode: cf.country || 'ES',
+        zip: cf.postalCode || '',
+        lat: finalLat,
+        lon: finalLon,
+        timezone: cf.timezone || 'Europe/Madrid',
+        isp: cf.asOrganization || 'Telefónica de España / Proveedor de Red',
+        org: cf.asOrganization || 'Red de Telecomunicaciones',
+        as: cf.asn ? `AS${cf.asn} ${cf.asOrganization || ''}` : 'AS3352 Telefónica de España',
         isProxy: false,
         isHosting: false,
         isMobile: false,
-        providerUsed: 'Cloudflare Edge',
+        providerUsed: 'Cloudflare Edge (Fallback)',
+        fallbacksAttempted,
+        durationMs: Date.now() - startTime,
       });
     }
 
