@@ -1,0 +1,6 @@
+{
+  "name": "Network Tools Hub",
+  "description": "Professional network diagnostics suite featuring DNS lookup, propagation checker, Whois/RDAP, IP geolocation, SSL/TLS inspector, HTTP headers analyzer, and port checker.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
