@@ -48,7 +48,7 @@ export const PortCheckerTool: React.FC<PortCheckerToolProps> = ({
 
   const copyResults = () => {
     if (!data) return;
-    const txt = data.results
+    const txt = (data?.results || [])
       .map((r) => `Puerto ${r.port} (${r.service}): ${r.status} [${r.durationMs}ms]`)
       .join('\n');
     navigator.clipboard.writeText(txt);
@@ -191,7 +191,7 @@ export const PortCheckerTool: React.FC<PortCheckerToolProps> = ({
           </div>
 
           {/* Filtro de Estado */}
-          {data.results.length > 1 && (
+          {(data?.results || []).length > 1 && (
             <div className="flex items-center gap-1 p-1 bg-slate-950 rounded-lg border border-slate-800/80 w-fit">
               {(['ALL', 'OPEN', 'CLOSED', 'FILTERED'] as const).map((filter) => (
                 <button
