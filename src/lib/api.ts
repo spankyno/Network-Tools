@@ -40,6 +40,38 @@ export async function fetchWhois(query: string): Promise<WhoisResponse> {
 }
 
 export async function fetchIp(ip?: string): Promise<IpResponse> {
+  if (!ip) {
+    try {
+      const resp = await fetch('https://ipwho.is/', { signal: AbortSignal.timeout(4000) });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.success !== false) {
+          return {
+            ip: data.ip,
+            version: data.type === 'IPv6' ? 'IPv6' : 'IPv4',
+            country: data.country || 'Desconocido',
+            countryCode: data.country_code || '',
+            region: data.region || '',
+            regionCode: data.region_code || '',
+            city: data.city || 'Desconocida',
+            zip: data.postal || '',
+            lat: typeof data.latitude === 'number' ? data.latitude : 0,
+            lon: typeof data.longitude === 'number' ? data.longitude : 0,
+            timezone: data.timezone?.id || 'UTC',
+            isp: data.connection?.isp || data.connection?.org || 'Desconocido',
+            org: data.connection?.org || '',
+            as: data.connection?.asn ? `AS${data.connection.asn} ${data.connection.org || ''}` : '',
+            isMobile: false,
+            isProxy: Boolean(data.security?.is_proxy || data.security?.is_vpn),
+            isHosting: Boolean(data.security?.is_datacenter),
+            providerUsed: 'ipwho.is (Client Direct)',
+          };
+        }
+      }
+    } catch {
+      // fallback to backend API
+    }
+  }
   const query = ip ? `?ip=${encodeURIComponent(ip)}` : '';
   return handleFetch<IpResponse>(`/api/ip${query}`);
 }

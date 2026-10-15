@@ -1250,16 +1250,28 @@ const COMMON_PORTS = [
   { port: 8443, service: 'HTTPS Alt', protocol: 'TCP' },
 ];
 
-function checkSinglePort(host: string, port: number, timeoutMs = 2800): Promise<{
+function checkSinglePort(host: string, port: number, timeoutMs = 3000): Promise<{
   port: number;
   open: boolean;
   durationMs: number;
   status: 'OPEN' | 'CLOSED' | 'FILTERED';
 }> {
-  return new Promise((resolve) => {
+  return new Promise(async (resolve) => {
     const startTime = Date.now();
-    const socket = new net.Socket();
+    let targetIp = host;
 
+    try {
+      if (!net.isIP(host)) {
+        const resolved = await dns.promises.lookup(host);
+        if (resolved && resolved.address) {
+          targetIp = resolved.address;
+        }
+      }
+    } catch {
+      // continuar con host original si falla dns.lookup
+    }
+
+    const socket = new net.Socket();
     socket.setTimeout(timeoutMs);
 
     socket.on('connect', () => {
@@ -1277,14 +1289,14 @@ function checkSinglePort(host: string, port: number, timeoutMs = 2800): Promise<
     socket.on('error', (err: any) => {
       const duration = Date.now() - startTime;
       socket.destroy();
-      if (err.code === 'ECONNREFUSED') {
+      if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') {
         resolve({ port, open: false, durationMs: duration, status: 'CLOSED' });
       } else {
         resolve({ port, open: false, durationMs: duration, status: 'FILTERED' });
       }
     });
 
-    socket.connect(port, host);
+    socket.connect(port, targetIp);
   });
 }
 

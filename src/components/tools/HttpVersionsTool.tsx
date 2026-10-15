@@ -60,9 +60,9 @@ export const HttpVersionsTool: React.FC<HttpVersionsToolProps> = ({
   };
 
   const supports = {
-    http1: Boolean(data?.supports?.http1 ?? (data as any)?.http1 ?? true),
-    http2: Boolean(data?.supports?.http2 ?? (data as any)?.http2 ?? ((data as any)?.negotiatedProtocol === 'h2')),
-    http3: Boolean(data?.supports?.http3 ?? (data as any)?.http3 ?? (data as any)?.quicSupported ?? false),
+    http1: Boolean(data?.supports?.http1 ?? true),
+    http2: Boolean(data?.supports?.http2 ?? (data?.negotiatedProtocol === 'h2')),
+    http3: Boolean(data?.supports?.http3 ?? false),
   };
 
   const protocols = (data?.protocols && data.protocols.length > 0)

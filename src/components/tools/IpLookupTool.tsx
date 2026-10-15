@@ -73,20 +73,16 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
   const handleSearch = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const query = ipInput.trim();
-    if (query === activeQuery) {
-      refetch();
-    } else {
-      setActiveQuery(query);
+    if (!query) {
+      setActiveQuery('');
+      return;
     }
+    setActiveQuery(query);
   };
 
   const handleMyIp = () => {
     setIpInput('');
-    if (activeQuery === '') {
-      refetch();
-    } else {
-      setActiveQuery('');
-    }
+    setActiveQuery('');
   };
 
   const copyDetails = () => {
