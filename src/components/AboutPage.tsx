@@ -102,6 +102,27 @@ export const AboutPage: React.FC<AboutPageProps> = ({ onBackToTools, onSelectToo
         </div>
       </div>
 
+      {/* Vista Previa Open Graph (og-image.png 1200x630) */}
+      <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-bold text-slate-200 uppercase tracking-wider font-mono flex items-center gap-2">
+            <Globe className="w-4 h-4 text-cyan-400" />
+            <span>Vista Previa Social / Open Graph (og-image.png · 1200x630)</span>
+          </h2>
+          <span className="text-xs font-mono text-slate-400">Redes y SEO</span>
+        </div>
+        <p className="text-xs text-slate-400 leading-relaxed">
+          Imagen oficial de previsualización optimizada para redes sociales, Twitter/X, LinkedIn y buscadores (1200x630 píxeles).
+        </p>
+        <div className="rounded-lg overflow-hidden border border-slate-700/60 bg-slate-950 shadow-2xl">
+          <img
+            src="/og-image.png"
+            alt="Network Tools Hub Open Graph Banner"
+            className="w-full h-auto object-cover max-h-[350px]"
+          />
+        </div>
+      </div>
+
       {/* Pilares Clave */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
         <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-6 space-y-3">
