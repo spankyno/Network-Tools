@@ -57,7 +57,7 @@ export const PortCheckerTool: React.FC<PortCheckerToolProps> = ({
     toast('Resultados de puertos copiados', 'success');
   };
 
-  const filteredResults = data?.results.filter((r) => {
+  const filteredResults = (data?.results || []).filter((r) => {
     if (statusFilter === 'ALL') return true;
     return r.status === statusFilter;
   });
