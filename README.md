@@ -11,7 +11,7 @@ Sigue estos sencillos pasos para compilar y desplegar la aplicación directament
 ### Paso 1: Conectar el repositorio en Cloudflare
 1. Entra a tu panel de control de Cloudflare: [dash.cloudflare.com](https://dash.cloudflare.com/).
 2. En el menú lateral izquierdo, haz clic en **Workers & Pages** (o **Pages**).
-3. Haz clic en el botón azul **Create application** (Crear aplicación).
+3. Haz clic en el botón azul **Create application** (Crear aplicación). 
 4. Selecciona la pestaña **Pages** y haz clic en **Connect to Git** (Conectar a Git).
 5. Autoriza tu cuenta de GitHub (si aún no lo has hecho) y selecciona el repositorio de Network Tools Hub.
 
