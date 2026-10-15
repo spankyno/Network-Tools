@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
+import cors from 'cors';
 import tls from 'tls';
 import net from 'net';
 import dns from 'dns';
@@ -12,18 +13,9 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
+app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 
-// CORS middleware for external frontend deployments (e.g. Cloudflare Pages, Vercel)
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
 
 // Helper para limpiar nombres de host / dominios
 function cleanHost(input: string): string {
