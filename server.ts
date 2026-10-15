@@ -521,6 +521,17 @@ app.get('/api/ip', async (req: Request, res: Response) => {
     target = '';
   }
 
+  if (target && net.isIP(target) === 0) {
+    try {
+      const addresses = await dns.promises.resolve4(target);
+      if (addresses && addresses.length > 0) {
+        target = addresses[0];
+      }
+    } catch {
+      // Ignorar fallo de resolución DNS
+    }
+  }
+
   const startTime = Date.now();
   const fallbacksAttempted: string[] = [];
 

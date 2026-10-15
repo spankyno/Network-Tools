@@ -1,4 +1,4 @@
-const CACHE_NAME = 'netcheck-cache-v3';
+const CACHE_NAME = 'netcheck-cache-v4';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -38,15 +38,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Filtrar esquemas no soportados por la Cache API (chrome-extension, blob, data, etc.)
-  if (!event.request.url.startsWith('http://') && !event.request.url.startsWith('https://')) {
-    return;
-  }
-
   let url;
   try {
     url = new URL(event.request.url);
   } catch {
+    return;
+  }
+
+  // Filtrar estrictamente esquemas no soportados por la Cache API (chrome-extension, blob, data, etc.)
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     return;
   }
 
@@ -84,11 +84,12 @@ self.addEventListener('fetch', (event) => {
     caches.match(event.request).then((cachedResponse) => {
       const fetchPromise = fetch(event.request)
         .then((networkResponse) => {
-          // Solo almacenar respuestas exitosas válidas
+          // Solo almacenar respuestas exitosas válidas de http/https
           if (
             networkResponse &&
             networkResponse.status === 200 &&
-            (networkResponse.type === 'basic' || networkResponse.type === 'cors')
+            (networkResponse.type === 'basic' || networkResponse.type === 'cors') &&
+            (url.protocol === 'http:' || url.protocol === 'https:')
           ) {
             const responseClone = networkResponse.clone();
             caches.open(CACHE_NAME).then((cache) => {
