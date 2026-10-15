@@ -12,8 +12,28 @@ import {
   PortCheckResponse,
 } from '../types/network';
 
-async function handleFetch<T>(url: string): Promise<T> {
+const getApiBase = () => {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL;
+  }
+  const hostname = window.location.hostname;
+  if (hostname.includes('pages.dev') || hostname.includes('vercel.app')) {
+    return 'https://ais-dev-wnyzjvragqkj5spcqboanr-73893629377.europe-west2.run.app';
+  }
+  return '';
+};
+
+async function handleFetch<T>(endpoint: string): Promise<T> {
+  const base = getApiBase();
+  const url = `${base}${endpoint}`;
   const response = await fetch(url);
+  const contentType = response.headers.get('content-type');
+
+  if (!contentType || !contentType.includes('application/json')) {
+    const text = await response.text();
+    throw new Error(`Error de conexión con el servidor (${response.status}): ${text.slice(0, 80)}`);
+  }
+
   const data = await response.json();
   if (!response.ok) {
     throw new Error(data.error || `La solicitud falló con código ${response.status}`);
