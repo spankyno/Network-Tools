@@ -13,7 +13,20 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use(cors({ origin: '*', credentials: true }));
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.headers.origin) {
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
 
@@ -1329,6 +1342,12 @@ app.get('/api/port-check', async (req: Request, res: Response) => {
             protocol: foundService ? foundService.protocol : 'TCP',
           },
         ],
+        summary: {
+          total: 1,
+          open: result.open ? 1 : 0,
+          closed: result.status === 'CLOSED' ? 1 : 0,
+          filtered: result.status === 'FILTERED' ? 1 : 0,
+        },
       });
     }
 

@@ -16,10 +16,6 @@ const getApiBase = () => {
   if (import.meta.env.VITE_API_BASE_URL) {
     return import.meta.env.VITE_API_BASE_URL;
   }
-  const hostname = window.location.hostname;
-  if (hostname.includes('pages.dev') || hostname.includes('vercel.app')) {
-    return 'https://ais-dev-wnyzjvragqkj5spcqboanr-73893629377.europe-west2.run.app';
-  }
   return '';
 };
 

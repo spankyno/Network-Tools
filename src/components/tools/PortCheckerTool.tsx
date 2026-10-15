@@ -48,7 +48,22 @@ export const PortCheckerTool: React.FC<PortCheckerToolProps> = ({
 
   const copyResults = () => {
     if (!data) return;
-    const txt = (data?.results || [])
+    const items = Array.isArray(data?.results)
+      ? data.results
+      : (data as any)?.port
+      ? [
+          {
+            port: (data as any).port,
+            service: (data as any).service || `Puerto ${(data as any).port}`,
+            protocol: (data as any).protocol || 'TCP',
+            open: (data as any).open ?? ((data as any).status === 'OPEN'),
+            durationMs: (data as any).durationMs || (data as any).rttMs || 0,
+            status: (data as any).status || 'OPEN',
+          },
+        ]
+      : [];
+
+    const txt = items
       .map((r) => `Puerto ${r.port} (${r.service}): ${r.status} [${r.durationMs}ms]`)
       .join('\n');
     navigator.clipboard.writeText(txt);
@@ -57,7 +72,22 @@ export const PortCheckerTool: React.FC<PortCheckerToolProps> = ({
     toast('Resultados de puertos copiados', 'success');
   };
 
-  const filteredResults = (data?.results || []).filter((r) => {
+  const results = Array.isArray(data?.results)
+    ? data.results
+    : (data as any)?.port
+    ? [
+        {
+          port: (data as any).port,
+          service: (data as any).service || `Puerto ${(data as any).port}`,
+          protocol: (data as any).protocol || 'TCP',
+          open: (data as any).open ?? ((data as any).status === 'OPEN'),
+          durationMs: (data as any).durationMs || (data as any).rttMs || 0,
+          status: (data as any).status || 'OPEN',
+        },
+      ]
+    : [];
+
+  const filteredResults = results.filter((r) => {
     if (statusFilter === 'ALL') return true;
     return r.status === statusFilter;
   });
@@ -163,22 +193,26 @@ export const PortCheckerTool: React.FC<PortCheckerToolProps> = ({
                 <div className="text-sm font-semibold font-mono text-slate-100">{data.host}</div>
               </div>
               <div className="h-8 w-px bg-slate-800 hidden sm:block"></div>
-              {data.summary && (
-                <div className="flex items-center gap-3 text-xs font-mono">
-                  <div>
-                    <span className="text-slate-500 block text-[11px]">Abiertos</span>
-                    <span className="font-bold text-emerald-400 text-sm tabular-nums">{data.summary.open}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 block text-[11px]">Cerrados</span>
-                    <span className="font-bold text-amber-400 text-sm tabular-nums">{data.summary.closed}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 block text-[11px]">Filtrados</span>
-                    <span className="font-bold text-slate-400 text-sm tabular-nums">{data.summary.filtered}</span>
-                  </div>
+              <div className="flex items-center gap-3 text-xs font-mono">
+                <div>
+                  <span className="text-slate-500 block text-[11px]">Abiertos</span>
+                  <span className="font-bold text-emerald-400 text-sm tabular-nums">
+                    {data.summary?.open ?? results.filter((r) => r.open).length}
+                  </span>
                 </div>
-              )}
+                <div>
+                  <span className="text-slate-500 block text-[11px]">Cerrados</span>
+                  <span className="font-bold text-amber-400 text-sm tabular-nums">
+                    {data.summary?.closed ?? results.filter((r) => r.status === 'CLOSED').length}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-500 block text-[11px]">Filtrados</span>
+                  <span className="font-bold text-slate-400 text-sm tabular-nums">
+                    {data.summary?.filtered ?? results.filter((r) => r.status === 'FILTERED').length}
+                  </span>
+                </div>
+              </div>
             </div>
 
             <button
@@ -191,7 +225,7 @@ export const PortCheckerTool: React.FC<PortCheckerToolProps> = ({
           </div>
 
           {/* Filtro de Estado */}
-          {(data?.results || []).length > 1 && (
+          {results.length > 1 && (
             <div className="flex items-center gap-1 p-1 bg-slate-950 rounded-lg border border-slate-800/80 w-fit">
               {(['ALL', 'OPEN', 'CLOSED', 'FILTERED'] as const).map((filter) => (
                 <button
