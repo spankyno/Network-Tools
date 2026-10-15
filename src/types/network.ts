@@ -266,15 +266,40 @@ export interface TracerouteHop {
   loss: boolean;
 }
 
+export interface TracerouteProbeResult {
+  id?: string;
+  probe: {
+    city: string;
+    country: string;
+    continent: string;
+    region?: string;
+    asn?: number;
+    network?: string;
+  };
+  destination?: {
+    ip: string;
+    country?: string;
+    org?: string;
+    asn?: number;
+  };
+  stats: {
+    timeMs: number | null;
+    totalHops: number;
+  };
+  rawOutput?: string;
+  hops: TracerouteHop[];
+}
+
 export interface TracerouteResponse {
   target: string;
   provider: string;
-  probeLocation: string;
-  probeCountry: string;
-  totalHops: number;
+  probeLocation?: string;
+  probeCountry?: string;
+  totalHops?: number;
   durationMs: number;
   hops: TracerouteHop[];
   note?: string;
+  probes?: TracerouteProbeResult[];
 }
 
 // 11. Port Check Types

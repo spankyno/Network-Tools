@@ -108,8 +108,14 @@ export async function fetchHttpVersions(host: string): Promise<HttpVersionsRespo
   return handleFetch<HttpVersionsResponse>(`/api/http-versions?host=${encodeURIComponent(host)}`);
 }
 
-export async function fetchTraceroute(target: string): Promise<TracerouteResponse> {
-  return handleFetch<TracerouteResponse>(`/api/traceroute?target=${encodeURIComponent(target)}`);
+export async function fetchTraceroute(
+  target: string,
+  limit: number = 3,
+  region: string = 'EU'
+): Promise<TracerouteResponse> {
+  return handleFetch<TracerouteResponse>(
+    `/api/traceroute?target=${encodeURIComponent(target)}&limit=${limit}&region=${encodeURIComponent(region)}`
+  );
 }
 
 export async function fetchPortCheck(host: string, port?: number): Promise<PortCheckResponse> {
