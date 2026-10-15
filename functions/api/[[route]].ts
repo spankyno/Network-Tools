@@ -36,7 +36,7 @@ const statusMap: Record<number, string> = {
   5: 'REFUSED',
 };
 
-function jsonResponse(data: any, status: number = 200) {
+function jsonResponse(data: any, status: number = 200, extraHeaders?: Record<string, string>) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
@@ -44,6 +44,7 @@ function jsonResponse(data: any, status: number = 200) {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
+      ...(extraHeaders || {}),
     },
   });
 }
@@ -1416,6 +1417,76 @@ export async function onRequest(context: any): Promise<Response> {
           },
         ],
       });
+    }
+
+    // 12. Speed Test Endpoints
+    if (pathname === '/api/speedtest/ping') {
+      return jsonResponse(
+        { pong: true, time: Date.now() },
+        200,
+        { 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0' }
+      );
+    }
+
+    if (pathname === '/api/speedtest/download') {
+      const reqBytes = parseInt(searchParams.get('bytes') || '5242880', 10);
+      const totalBytes = Math.min(Math.max(!isNaN(reqBytes) ? reqBytes : 5242880, 65536), 26214400);
+      const chunkSize = 65536;
+      let sent = 0;
+
+      const chunk = new Uint8Array(chunkSize);
+      for (let i = 0; i < chunkSize; i++) {
+        chunk[i] = (i * 31 + 17) & 0xff;
+      }
+
+      const stream = new ReadableStream({
+        pull(controller) {
+          if (sent >= totalBytes) {
+            controller.close();
+            return;
+          }
+          const remaining = totalBytes - sent;
+          const currentChunkSize = Math.min(remaining, chunkSize);
+          const toSend = currentChunkSize === chunkSize ? chunk : chunk.subarray(0, currentChunkSize);
+          sent += currentChunkSize;
+          controller.enqueue(toSend);
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': totalBytes.toString(),
+          'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': '*',
+        },
+      });
+    }
+
+    if (pathname === '/api/speedtest/upload') {
+      const startTime = Date.now();
+      let totalBytes = 0;
+      if (context.request.body) {
+        const reader = context.request.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) totalBytes += value.length;
+        }
+      }
+      const durationMs = Math.max(1, Date.now() - startTime);
+      const mbps = (totalBytes * 8) / (durationMs / 1000) / 1000000;
+      return jsonResponse(
+        {
+          receivedBytes: totalBytes,
+          durationMs,
+          mbps: Math.round(mbps * 100) / 100,
+        },
+        200,
+        { 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0' }
+      );
     }
 
     return jsonResponse({ error: 'Endpoint no encontrado' }, 404);

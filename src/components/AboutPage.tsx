@@ -53,6 +53,7 @@ export const AboutPage: React.FC<AboutPageProps> = ({ onBackToTools, onSelectToo
         { name: 'Node.js & Express / Cloudflare Workers', desc: 'Rutas seguras para sortear restricciones de CORS del navegador.' },
         { name: 'Sockets TCP Nativos (net.Socket)', desc: 'Comprobador de puertos reales sin servicios de terceros de pago.' },
         { name: 'Inspección TLS Nativa (tls.connect)', desc: 'Análisis profundo de certificados x509, fechas de expiración y cadenas de confianza.' },
+        { name: 'Motor Speedtest Multihilo', desc: 'Medición de ancho de banda streaming sin caché, cálculo de jitter en tiempo real y bufferbloat.' },
         { name: 'DoH (DNS over HTTPS RFC 8484)', desc: 'Consultas DNS encriptadas con failover automático: Cloudflare 1.1.1.1, Google 8.8.8.8 y Quad9.' },
         { name: 'RDAP & WHOIS (RFC 7484)', desc: 'Protocolo moderno de consulta de asignaciones IP y dominios ante RIRs (RIPE, ARIN, LACNIC, APNIC).' },
       ],
@@ -194,7 +195,15 @@ export const AboutPage: React.FC<AboutPageProps> = ({ onBackToTools, onSelectToo
 
                 <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
                   <span className="text-[11px] font-mono text-slate-500">
-                    {tool.id === 'ip' ? 'Leaflet + OSM' : tool.id === 'ssl' ? 'tls.connect' : tool.id === 'ports' ? 'net.Socket' : 'RFC / DoH'}
+                    {tool.id === 'speedtest'
+                      ? 'Streaming & RTT'
+                      : tool.id === 'ip'
+                      ? 'Leaflet + OSM'
+                      : tool.id === 'ssl'
+                      ? 'tls.connect'
+                      : tool.id === 'ports'
+                      ? 'net.Socket'
+                      : 'RFC / DoH'}
                   </span>
                   <button
                     onClick={() => onSelectTool(tool.id)}

@@ -20,6 +20,7 @@ import {
   Route,
   Server,
   FileText,
+  Gauge,
 } from 'lucide-react';
 import { clearHistory, removeHistoryItem, togglePinHistoryItem, exportHistoryToJson, importHistoryFromJson } from '../lib/history';
 import { useToast } from './Toast';
@@ -45,6 +46,7 @@ const TOOL_ICONS: Record<ToolId, React.ReactNode> = {
   traceroute: <Route className="w-3.5 h-3.5 text-emerald-400" />,
   ports: <Server className="w-3.5 h-3.5 text-rose-400" />,
   whois: <FileText className="w-3.5 h-3.5 text-indigo-400" />,
+  speedtest: <Gauge className="w-3.5 h-3.5 text-cyan-400" />,
 };
 
 function formatRelativeTime(timestamp: number): string {

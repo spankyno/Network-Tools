@@ -12,6 +12,7 @@ import {
   Route,
   Server,
   FileText,
+  Gauge,
 } from 'lucide-react';
 
 export type ToolCategory = 'dns' | 'security' | 'network' | 'web';
@@ -196,6 +197,20 @@ export const TOOL_REGISTRY: ToolDefinition[] = [
     icon: FileText,
     defaultQuery: 'github.com',
     placeholder: 'Introduzca dominio o IP (ej. github.com, 1.1.1.1)...',
+  },
+  {
+    id: 'speedtest',
+    name: 'Test de Velocidad',
+    shortName: 'Velocidad',
+    subtitle: 'Ancho de Banda, Ping y Bufferbloat',
+    description: 'Mide la velocidad real de descarga y subida en Mbps, latencia RTT, jitter y calidad de conexión para streaming y juegos.',
+    category: 'network',
+    categoryLabel: 'Red e Infraestructura',
+    badge: 'Velocidad',
+    tags: ['Mbps Bajada / Subida', 'Ping / Jitter', 'Bufferbloat'],
+    icon: Gauge,
+    defaultQuery: '',
+    placeholder: 'Haga clic en Iniciar Test para medir...',
   },
 ];
 

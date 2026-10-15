@@ -4,6 +4,7 @@ import cors from 'cors';
 import tls from 'tls';
 import net from 'net';
 import dns from 'dns';
+import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -1594,6 +1595,70 @@ app.get('/api/whois', async (req: Request, res: Response) => {
     });
   }
 });
+
+// -------------------------------------------------------------
+// 12. Speed Test Endpoints (Ping, Download, Upload)
+// -------------------------------------------------------------
+const RANDOM_SPEED_CHUNK = crypto.randomBytes(64 * 1024); // Pre-almacenar 64KB aleatorios para alto rendimiento sin CPU overhead
+
+app.get('/api/speedtest/ping', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.json({ pong: true, time: Date.now() });
+});
+
+app.get('/api/speedtest/download', (req, res) => {
+  const reqBytes = parseInt(req.query.bytes as string, 10);
+  const totalBytes = Math.min(Math.max(!isNaN(reqBytes) ? reqBytes : 5 * 1024 * 1024, 64 * 1024), 25 * 1024 * 1024);
+
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Length', totalBytes.toString());
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+
+  let bytesSent = 0;
+  const sendChunk = () => {
+    while (bytesSent < totalBytes) {
+      const remaining = totalBytes - bytesSent;
+      const chunkSize = Math.min(remaining, RANDOM_SPEED_CHUNK.length);
+      const slice = chunkSize === RANDOM_SPEED_CHUNK.length ? RANDOM_SPEED_CHUNK : RANDOM_SPEED_CHUNK.subarray(0, chunkSize);
+      bytesSent += chunkSize;
+      const ok = res.write(slice);
+      if (!ok) {
+        res.once('drain', sendChunk);
+        return;
+      }
+    }
+    res.end();
+  };
+
+  sendChunk();
+});
+
+app.post('/api/speedtest/upload', (req, res) => {
+  const startTime = Date.now();
+  let receivedBytes = 0;
+
+  req.on('data', (chunk) => {
+    receivedBytes += chunk.length;
+  });
+
+  req.on('end', () => {
+    const durationMs = Math.max(1, Date.now() - startTime);
+    const mbps = ((receivedBytes * 8) / (durationMs / 1000) / 1000000);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+    res.json({
+      receivedBytes,
+      durationMs,
+      mbps: Math.round(mbps * 100) / 100,
+    });
+  });
+
+  req.on('error', (err) => {
+    res.status(500).json({ error: err.message });
+  });
+});
+
 
 // -------------------------------------------------------------
 // Montaje del servidor Vite en Dev o Estático en Prod

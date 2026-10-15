@@ -23,6 +23,7 @@ import { IpLookupTool } from './components/tools/IpLookupTool';
 import { TracerouteTool } from './components/tools/TracerouteTool';
 import { PortCheckerTool } from './components/tools/PortCheckerTool';
 import { WhoisLookupTool } from './components/tools/WhoisLookupTool';
+import { SpeedTestTool } from './components/tools/SpeedTestTool';
 
 import { ArrowLeft, Activity, ExternalLink } from 'lucide-react';
 
@@ -251,6 +252,11 @@ function MainApp() {
             {activeTool === 'whois' && (
               <WhoisLookupTool
                 initialQuery={currentQuery || 'github.com'}
+                onRunQuery={handleQueryExecuted}
+              />
+            )}
+            {activeTool === 'speedtest' && (
+              <SpeedTestTool
                 onRunQuery={handleQueryExecuted}
               />
             )}

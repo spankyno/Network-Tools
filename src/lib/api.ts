@@ -122,3 +122,24 @@ export async function fetchPortCheck(host: string, port?: number): Promise<PortC
   const portQuery = port ? `&port=${port}` : '';
   return handleFetch<PortCheckResponse>(`/api/port-check?host=${encodeURIComponent(host)}${portQuery}`);
 }
+
+export function getSpeedTestEndpoints(preferredServer: 'local' | 'cloudflare' = 'local') {
+  const base = getApiBase();
+  if (preferredServer === 'cloudflare') {
+    return {
+      name: 'Cloudflare Global CDN',
+      location: 'Anycast Global Edge (speed.cloudflare.com)',
+      pingUrl: 'https://speed.cloudflare.com/__down?bytes=0',
+      downUrl: (bytes: number) => `https://speed.cloudflare.com/__down?bytes=${bytes}`,
+      upUrl: 'https://speed.cloudflare.com/__up',
+    };
+  }
+  return {
+    name: 'Servidor Edge / Backend de la App',
+    location: 'Nodo Directo de Diagnóstico',
+    pingUrl: `${base}/api/speedtest/ping`,
+    downUrl: (bytes: number) => `${base}/api/speedtest/download?bytes=${bytes}`,
+    upUrl: `${base}/api/speedtest/upload`,
+  };
+}
+

@@ -9,7 +9,8 @@ export type ToolId =
   | 'ip'
   | 'traceroute'
   | 'ports'
-  | 'whois';
+  | 'whois'
+  | 'speedtest';
 
 export interface HistoryItem {
   id: string;
@@ -322,3 +323,47 @@ export interface PortCheckResponse {
     filtered: number;
   };
 }
+
+// 12. Speed Test Types
+export interface SpeedTestPingData {
+  current: number;
+  min: number;
+  avg: number;
+  max: number;
+  jitter: number;
+}
+
+export interface SpeedTestThroughputData {
+  currentMbps: number;
+  avgMbps: number;
+  peakMbps: number;
+  transferredBytes: number;
+}
+
+export interface SpeedTestPoint {
+  timeMs: number;
+  phase: 'ping' | 'download' | 'upload';
+  mbps: number;
+  pingMs?: number;
+}
+
+export interface SpeedTestResult {
+  ping: SpeedTestPingData;
+  download: SpeedTestThroughputData;
+  upload: SpeedTestThroughputData;
+  bufferbloat: {
+    idlePing: number;
+    loadedPing: number;
+    difference: number;
+    grade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F';
+  };
+  server: {
+    name: string;
+    location: string;
+    endpoint: string;
+  };
+  isp?: string;
+  ip?: string;
+  timestamp: number;
+}
+
