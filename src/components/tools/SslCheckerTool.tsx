@@ -5,6 +5,7 @@ import { SslResponse, ToolId } from '../../types/network';
 import { saveHistoryItem } from '../../lib/history';
 import { useToast } from '../Toast';
 import { Shield, Search, RefreshCw, Copy, Check, CheckCircle2, AlertTriangle, XCircle, Lock, KeyRound, Layers, Link2 } from 'lucide-react';
+import { LimitedNotice } from '../LimitedNotice';
 
 const EXAMPLES = ['github.com', 'cloudflare.com', 'google.com', 'wikipedia.org'];
 
@@ -154,6 +155,7 @@ export const SslCheckerTool: React.FC<SslCheckerToolProps> = ({
       {/* Resultados */}
       {data && !isLoading && (
         <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          <LimitedNotice message={data.notice} />
           {/* Encabezado */}
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-xl border border-slate-800 bg-slate-900/60">
             <div className="flex items-center gap-3">

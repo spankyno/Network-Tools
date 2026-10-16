@@ -1,56 +1,91 @@
 import express, { Request, Response } from 'express';
-import { createServer as createViteServer } from 'vite';
+import compression from 'compression';
 import cors from 'cors';
-import tls from 'tls';
-import net from 'net';
-import dns from 'dns';
-import crypto from 'crypto';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import tls from 'node:tls';
+import net from 'node:net';
+import dns from 'node:dns';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  TtlCache,
+  ResponseTooLargeError,
+  analyzeSecurityHeaders,
+  cleanHost,
+  expiryStatusFor,
+  isBlockedHostname,
+  isIP,
+  isPublicIp,
+  normalizeRecordType,
+  parseHost,
+  parsePort,
+  readJsonLimited,
+} from './shared/net-utils.ts';
+import { SECURITY_HEADERS } from './shared/headers.ts';
+import { lookupGeo } from './shared/geo.ts';
+import { fetchCtPayload } from './shared/ct.ts';
+import {
+  BlockedTargetError,
+  asyncHandler,
+  bandwidthBudget,
+  concurrencyLimit,
+  parseAllowedOrigins,
+  rateLimit,
+  requirePublicHost,
+  resolvePublicAddress,
+  safeHeadRequest,
+  safeLookup,
+  securityHeaders,
+  sendError,
+} from './server/security.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const isProd = process.env.NODE_ENV === 'production';
 const app = express();
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
-  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  if (req.headers.origin) {
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  }
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
-  next();
-});
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
+app.disable('x-powered-by');
 
-
-// Helper para limpiar nombres de host / dominios
-function cleanHost(input: string): string {
-  if (!input) return '';
-  let str = input.trim().toLowerCase();
-  str = str.replace(/^https?:\/\//i, '');
-  str = str.replace(/\/.*$/, '');
-  str = str.replace(/:\d+$/, '');
-  return str;
+// Detrás de un proxy/CDN hay que declararlo: si no, req.ip es la IP del proxy (el rate limit
+// sería global) y X-Forwarded-For sería falsificable. Use el nº de saltos de confianza (p. ej. 1).
+const trustProxyEnv = process.env.TRUST_PROXY?.trim();
+if (trustProxyEnv) {
+  app.set('trust proxy', /^\d+$/.test(trustProxyEnv) ? Number(trustProxyEnv) : trustProxyEnv === 'true' ? 1 : trustProxyEnv);
 }
+
+app.use(securityHeaders({ production: isProd, headers: SECURITY_HEADERS }));
+app.use(compression());
+
+// CORS: por defecto SOLO mismo origen (el front lo sirve este mismo servidor).
+// Para permitir otros orígenes, defina ALLOWED_ORIGINS="https://a.com,https://b.com". Nunca con credenciales.
+const allowedOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
+if (allowedOrigins.length > 0) {
+  app.use('/api', cors({ origin: allowedOrigins, methods: ['GET', 'POST', 'OPTIONS'], maxAge: 600 }));
+}
+
+// Límites de ritmo. El speed test queda fuera del límite general (hace muchas peticiones por diseño)
+// y se protege con límite de concurrencia y presupuesto de ancho de banda.
+const generalLimiter = rateLimit({ windowMs: 60_000, max: 120 });
+const heavyLimiter = rateLimit({ windowMs: 60_000, max: 20, message: 'Demasiadas comprobaciones activas. Espere un minuto.' });
+const portScanLimiter = rateLimit({ windowMs: 60_000, max: 8, message: 'Límite de comprobaciones de puertos alcanzado. Espere un minuto.' });
+const tracerouteLimiter = rateLimit({ windowMs: 60_000, max: 6, message: 'Límite de trazados alcanzado. Espere un minuto.' });
+app.use('/api', (req, res, next) => (req.path.startsWith('/speedtest') ? next() : generalLimiter(req, res, next)));
 
 // -------------------------------------------------------------
 // 1. DNS Lookup API (Con Fallback en Cascada entre Proveedores)
 // Proveedores: Google DoH -> Cloudflare DoH -> Quad9 -> Node Native
 // -------------------------------------------------------------
-app.get('/api/dns', async (req: Request, res: Response) => {
+app.get('/api/dns', asyncHandler(async (req: Request, res: Response) => {
   const name = cleanHost(req.query.name as string);
-  const type = ((req.query.type as string) || 'A').toUpperCase();
+  const type = normalizeRecordType(req.query.type);
 
   if (!name) {
-    return res.status(400).json({ error: 'El nombre de dominio o host es obligatorio' });
+    return res.status(400).json({ error: 'El nombre de dominio o host es obligatorio o no es válido' });
+  }
+  if (!type) {
+    return res.status(400).json({ error: 'Tipo de registro DNS no admitido' });
   }
 
   const startTime = Date.now();
@@ -192,17 +227,20 @@ app.get('/api/dns', async (req: Request, res: Response) => {
       fallbacksAttempted,
     });
   }
-});
+}));
 
 // -------------------------------------------------------------
 // 2. DNS Propagation API (8 Resolutores Globales)
 // -------------------------------------------------------------
-app.get('/api/dns-propagation', async (req: Request, res: Response) => {
+app.get('/api/dns-propagation', asyncHandler(async (req: Request, res: Response) => {
   const name = cleanHost(req.query.name as string);
-  const type = ((req.query.type as string) || 'A').toUpperCase();
+  const type = normalizeRecordType(req.query.type);
 
   if (!name) {
-    return res.status(400).json({ error: 'El dominio o host es obligatorio' });
+    return res.status(400).json({ error: 'El dominio o host es obligatorio o no es válido' });
+  }
+  if (!type) {
+    return res.status(400).json({ error: 'Tipo de registro DNS no admitido' });
   }
 
   const resolvers = [
@@ -373,13 +411,13 @@ app.get('/api/dns-propagation', async (req: Request, res: Response) => {
       matchesMajority: item.records.sort().join(',') === majoritySignature,
     })),
   });
-});
+}));
 
 // -------------------------------------------------------------
 // 3. DNSSEC Checker API (Nuevo)
 // Consulta DNSKEY, DS y RRSIG para validar la cadena de confianza
 // -------------------------------------------------------------
-app.get('/api/dnssec', async (req: Request, res: Response) => {
+app.get('/api/dnssec', asyncHandler(async (req: Request, res: Response) => {
   const name = cleanHost(req.query.name as string);
 
   if (!name) {
@@ -514,645 +552,375 @@ app.get('/api/dnssec', async (req: Request, res: Response) => {
       domain: name,
     });
   }
-});
+}));
 
 // -------------------------------------------------------------
 // 4. IP Geolocation API (Con Fallback en Cascada entre Proveedores)
-// Proveedores: ip-api.com -> ipwho.is -> ipapi.co
+// Proveedores (HTTPS primero): ipwho.is -> ipapi.co -> ip-api.com (solo HTTP en su plan gratuito: último recurso)
 // -------------------------------------------------------------
-app.get('/api/ip', async (req: Request, res: Response) => {
-  let rawTarget = (req.query.ip as string || '').trim();
-  let target = cleanHost(rawTarget).replace(/:\d+$/, '');
+app.get('/api/ip', asyncHandler(async (req: Request, res: Response) => {
+  const raw = typeof req.query.ip === 'string' ? req.query.ip.trim() : '';
+  const wantsSelf = !raw || raw === 'me' || raw === 'self';
+  let target = '';
 
-  // Si no se especifica IP o es "me", obtener del encabezado
-  if (!target || target === 'me' || target === 'self') {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string') {
-      target = forwarded.split(',')[0].trim();
-    } else if (req.socket.remoteAddress) {
-      target = req.socket.remoteAddress.replace(/^.*:/, '');
-    }
-  }
-
-  if (target === '127.0.0.1' || target === '::1') {
-    target = '';
-  }
-
-  if (target && net.isIP(target) === 0) {
-    try {
-      const addresses = await dns.promises.resolve4(target);
-      if (addresses && addresses.length > 0) {
-        target = addresses[0];
+  if (wantsSelf) {
+    // req.ip respeta TRUST_PROXY; nunca se lee X-Forwarded-For directamente (es falsificable).
+    const client = (req.ip || req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    // En desarrollo local (IP privada/loopback) se deja vacío y el proveedor usa la IP de salida del servidor.
+    target = client && isPublicIp(client) ? client : '';
+  } else {
+    const parsed = parseHost(raw);
+    if (!parsed) return res.status(400).json({ error: 'La dirección IP o dominio indicado no es válido' });
+    if (parsed.kind === 'domain') {
+      if (isBlockedHostname(parsed.host)) {
+        return res.status(400).json({ error: 'Solo se pueden geolocalizar direcciones públicas de Internet.' });
       }
-    } catch {
-      // Ignorar fallo de resolución DNS
+      try {
+        target = (await dns.promises.lookup(parsed.host)).address;
+      } catch {
+        return res.status(404).json({ error: `No se pudo resolver '${parsed.host}' a una dirección IP.` });
+      }
+    } else {
+      target = parsed.host;
+    }
+    if (!isPublicIp(target)) {
+      return res.status(400).json({ error: 'Es una dirección privada o reservada: no tiene geolocalización pública.' });
     }
   }
 
   const startTime = Date.now();
-  const fallbacksAttempted: string[] = [];
-
-  // Proveedor 1: ip-api.com
   try {
-    fallbacksAttempted.push('ip-api.com');
-    const endpoint = target
-      ? `http://ip-api.com/json/${encodeURIComponent(target)}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,query,mobile,proxy,hosting`
-      : `http://ip-api.com/json/?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,query,mobile,proxy,hosting`;
-
-    const r = await fetch(endpoint, { signal: AbortSignal.timeout(4000) });
-    if (r.ok) {
-      const data = await r.json();
-      if (data.status === 'success' || data.query) {
-        return res.json({
-          ip: data.query,
-          version: data.query?.includes(':') ? 'IPv6' : 'IPv4',
-          country: data.country || 'Desconocido',
-          countryCode: data.countryCode || '',
-          region: data.regionName || data.region || '',
-          regionCode: data.region || '',
-          city: data.city || 'Desconocida',
-          zip: data.zip || '',
-          lat: typeof data.lat === 'number' ? data.lat : 0,
-          lon: typeof data.lon === 'number' ? data.lon : 0,
-          timezone: data.timezone || 'UTC',
-          isp: data.isp || 'Desconocido',
-          org: data.org || data.isp || '',
-          as: data.as || '',
-          isMobile: Boolean(data.mobile),
-          isProxy: Boolean(data.proxy),
-          isHosting: Boolean(data.hosting),
-          providerUsed: 'ip-api.com',
-          fallbacksAttempted,
-          durationMs: Date.now() - startTime,
-        });
-      }
-    }
-  } catch {
-    // Probar segundo proveedor
+    const result = await lookupGeo(target);
+    res.json({ ...result, durationMs: Date.now() - startTime });
+  } catch (err: any) {
+    res.status(502).json({
+      error: `No se pudo geolocalizar la IP '${target || 'cliente'}'. Todos los proveedores gratuitos fallaron o agotaron su tiempo de espera.`,
+      fallbacksAttempted: err?.fallbacksAttempted ?? [],
+    });
   }
-
-  // Proveedor 2: ipwho.is (gratuita, sin API key, soporte CORS/HTTPS)
-  try {
-    fallbacksAttempted.push('ipwho.is');
-    const endpoint = target ? `https://ipwho.is/${encodeURIComponent(target)}` : 'https://ipwho.is/';
-    const r = await fetch(endpoint, { signal: AbortSignal.timeout(4000) });
-    if (r.ok) {
-      const data = await r.json();
-      if (data.success !== false) {
-        return res.json({
-          ip: data.ip,
-          version: data.type === 'IPv6' ? 'IPv6' : 'IPv4',
-          country: data.country || 'Desconocido',
-          countryCode: data.country_code || '',
-          region: data.region || '',
-          regionCode: data.region_code || '',
-          city: data.city || 'Desconocida',
-          zip: data.postal || '',
-          lat: typeof data.latitude === 'number' ? data.latitude : 0,
-          lon: typeof data.longitude === 'number' ? data.longitude : 0,
-          timezone: data.timezone?.id || 'UTC',
-          isp: data.connection?.isp || data.connection?.org || 'Desconocido',
-          org: data.connection?.org || '',
-          as: data.connection?.asn ? `AS${data.connection.asn} ${data.connection.org || ''}` : '',
-          isMobile: false,
-          isProxy: Boolean(data.security?.is_proxy || data.security?.is_vpn),
-          isHosting: Boolean(data.security?.is_datacenter),
-          providerUsed: 'ipwho.is',
-          fallbacksAttempted,
-          durationMs: Date.now() - startTime,
-        });
-      }
-    }
-  } catch {
-    // Probar tercer proveedor
-  }
-
-  // Proveedor 3: ipapi.co
-  try {
-    fallbacksAttempted.push('ipapi.co');
-    const endpoint = target ? `https://ipapi.co/${encodeURIComponent(target)}/json/` : 'https://ipapi.co/json/';
-    const r = await fetch(endpoint, { signal: AbortSignal.timeout(4000) });
-    if (r.ok) {
-      const data = await r.json();
-      if (!data.error) {
-        return res.json({
-          ip: data.ip,
-          version: data.version || 'IPv4',
-          country: data.country_name || 'Desconocido',
-          countryCode: data.country_code || '',
-          region: data.region || '',
-          regionCode: data.region_code || '',
-          city: data.city || 'Desconocida',
-          zip: data.postal || '',
-          lat: typeof data.latitude === 'number' ? data.latitude : 0,
-          lon: typeof data.longitude === 'number' ? data.longitude : 0,
-          timezone: data.timezone || 'UTC',
-          isp: data.org || 'Desconocido',
-          org: data.org || '',
-          as: data.asn ? `${data.asn} ${data.org || ''}` : '',
-          isMobile: false,
-          isProxy: false,
-          isHosting: false,
-          providerUsed: 'ipapi.co',
-          fallbacksAttempted,
-          durationMs: Date.now() - startTime,
-        });
-      }
-    }
-  } catch {
-    // Si todos fallan
-  }
-
-  res.status(500).json({
-    error: `No se pudo geolocalizar la IP '${target || 'cliente'}'. Todos los proveedores gratuitos agotaron su tiempo de espera.`,
-    fallbacksAttempted,
-  });
-});
+}));
 
 // -------------------------------------------------------------
 // 5. SSL / TLS Certificate Inspector API
+// rejectUnauthorized=false es deliberado: el objetivo es INSPECCIONAR también certificados
+// caducados o autofirmados. Por eso el destino se restringe a IPs públicas (safeLookup).
 // -------------------------------------------------------------
-app.get('/api/ssl', (req: Request, res: Response) => {
-  const host = cleanHost(req.query.host as string);
-  const port = parseInt(req.query.port as string, 10) || 443;
-
-  if (!host) {
-    return res.status(400).json({ error: 'El nombre de host es obligatorio' });
+app.get('/api/ssl', heavyLimiter, asyncHandler(async (req: Request, res: Response) => {
+  const sslPort = parsePort(req.query.port, 443); // barato: se valida antes de tocar la red
+  if (sslPort === null) {
+    return res.status(400).json({ error: 'El puerto debe estar entre 1 y 65535' });
+  }
+  let host: string;
+  try {
+    host = await requirePublicHost(req.query.host);
+  } catch (err) {
+    return sendError(res, err, 'El host indicado no es válido');
   }
 
   const startTime = Date.now();
+  let settled = false;
+  const finish = (fn: () => void) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(deadline);
+    fn();
+  };
+
   const socket = tls.connect(
     {
       host,
-      port,
-      servername: host,
+      port: sslPort,
+      servername: net.isIP(host) ? undefined : host, // SNI no admite IPs
       rejectUnauthorized: false,
       timeout: 6000,
+      lookup: safeLookup, // la IP validada es la IP usada: sin ventana para DNS rebinding
     },
     () => {
-      try {
-        const cert: any = socket.getPeerCertificate(true);
-        const protocol = socket.getProtocol();
-        const cipher = socket.getCipher();
-        const duration = Date.now() - startTime;
-        const authorized = socket.authorized;
-        const authError = socket.authorizationError;
+      finish(() => {
+        try {
+          const cert: any = socket.getPeerCertificate(true);
+          const protocol = socket.getProtocol();
+          const cipher = socket.getCipher();
+          const authorized = socket.authorized;
+          const authError = socket.authorizationError;
+          socket.destroy();
 
-        socket.destroy();
-
-        if (!cert || Object.keys(cert).length === 0) {
-          return res.status(502).json({ error: 'No se recibió ningún certificado TLS del servidor remoto' });
-        }
-
-        const validFrom = new Date(cert.valid_from).toISOString();
-        const validTo = new Date(cert.valid_to).toISOString();
-        const now = Date.now();
-        const expiresAt = new Date(cert.valid_to).getTime();
-        const daysRemaining = Math.round((expiresAt - now) / (1000 * 60 * 60 * 24));
-        const isExpired = daysRemaining < 0;
-
-        const chain: any[] = [];
-        let curr = cert;
-        const seen = new Set();
-        while (curr && !seen.has(curr.fingerprint256)) {
-          seen.add(curr.fingerprint256);
-          chain.push({
-            subject: curr.subject?.CN || curr.subject?.O || 'Desconocido',
-            issuer: curr.issuer?.CN || curr.issuer?.O || 'Desconocido',
-            validFrom: curr.valid_from,
-            validTo: curr.valid_to,
-            fingerprint256: curr.fingerprint256,
-            serialNumber: curr.serialNumber,
-          });
-          if (curr.issuerCertificate && curr.issuerCertificate !== curr) {
-            curr = curr.issuerCertificate;
-          } else {
-            break;
+          if (!cert || Object.keys(cert).length === 0) {
+            return res.status(502).json({ error: 'No se recibió ningún certificado TLS del servidor remoto' });
           }
+
+          const validFrom = new Date(cert.valid_from).toISOString();
+          const validTo = new Date(cert.valid_to).toISOString();
+          const daysRemaining = Math.round((new Date(cert.valid_to).getTime() - Date.now()) / 86_400_000);
+          const isExpired = daysRemaining < 0;
+
+          const chain: any[] = [];
+          let curr = cert;
+          const seen = new Set();
+          while (curr && !seen.has(curr.fingerprint256)) {
+            seen.add(curr.fingerprint256);
+            chain.push({
+              subject: curr.subject?.CN || curr.subject?.O || 'Desconocido',
+              issuer: curr.issuer?.CN || curr.issuer?.O || 'Desconocido',
+              validFrom: curr.valid_from,
+              validTo: curr.valid_to,
+              fingerprint256: curr.fingerprint256,
+              serialNumber: curr.serialNumber,
+            });
+            if (curr.issuerCertificate && curr.issuerCertificate !== curr) curr = curr.issuerCertificate;
+            else break;
+          }
+
+          const sanList: string[] = cert.subjectaltname
+            ? cert.subjectaltname.split(',').map((s: string) => s.trim().replace(/^DNS:/, ''))
+            : [];
+
+          res.json({
+            host,
+            port: sslPort,
+            authorized,
+            authorizationError: authError ? String(authError) : null,
+            protocol,
+            cipher: cipher ? { name: cipher.name, version: cipher.version } : null,
+            durationMs: Date.now() - startTime,
+            subject: {
+              commonName: cert.subject?.CN || '',
+              organization: cert.subject?.O || '',
+              organizationalUnit: cert.subject?.OU || '',
+              country: cert.subject?.C || '',
+              state: cert.subject?.ST || '',
+              locality: cert.subject?.L || '',
+            },
+            issuer: {
+              commonName: cert.issuer?.CN || '',
+              organization: cert.issuer?.O || '',
+              country: cert.issuer?.C || '',
+            },
+            validFrom,
+            validTo,
+            daysRemaining,
+            isExpired,
+            expiryStatus: expiryStatusFor(daysRemaining),
+            serialNumber: cert.serialNumber,
+            fingerprint256: cert.fingerprint256,
+            fingerprint: cert.fingerprint,
+            subjectAltNames: sanList,
+            chain,
+          });
+        } catch (innerErr) {
+          socket.destroy();
+          console.error('[ssl] error al procesar el certificado', innerErr);
+          res.status(500).json({ error: 'Error al procesar los datos del certificado' });
         }
-
-        const sanList = cert.subjectaltname ? cert.subjectaltname.split(',').map((s: string) => s.trim().replace(/^DNS:/, '')) : [];
-
-        res.json({
-          host,
-          port,
-          authorized,
-          authorizationError: authError || null,
-          protocol,
-          cipher: cipher ? { name: cipher.name, version: cipher.version } : null,
-          durationMs: duration,
-          subject: {
-            commonName: cert.subject?.CN || '',
-            organization: cert.subject?.O || '',
-            organizationalUnit: cert.subject?.OU || '',
-            country: cert.subject?.C || '',
-            state: cert.subject?.ST || '',
-            locality: cert.subject?.L || '',
-          },
-          issuer: {
-            commonName: cert.issuer?.CN || '',
-            organization: cert.issuer?.O || '',
-            country: cert.issuer?.C || '',
-          },
-          validFrom,
-          validTo,
-          daysRemaining,
-          isExpired,
-          expiryStatus: isExpired ? 'EXPIRED' : daysRemaining < 15 ? 'CRITICAL' : daysRemaining < 30 ? 'EXPIRING_SOON' : 'VALID',
-          serialNumber: cert.serialNumber,
-          fingerprint256: cert.fingerprint256,
-          fingerprint: cert.fingerprint,
-          subjectAltNames: sanList,
-          chain,
-        });
-      } catch (innerErr: any) {
-        socket.destroy();
-        res.status(500).json({ error: innerErr.message || 'Error al procesar los datos del certificado' });
-      }
+      });
     }
   );
 
+  // Plazo duro total: el timeout del socket solo mide inactividad (un servidor lento podría retenerlo)
+  const deadline = setTimeout(() => {
+    finish(() => {
+      socket.destroy();
+      res.status(504).json({ error: `Tiempo de espera agotado al conectar a ${host}:${sslPort}` });
+    });
+  }, 9000);
+
   socket.on('error', (err: any) => {
-    socket.destroy();
-    res.status(502).json({
-      error: `La conexión TLS a ${host}:${port} falló: ${err.message}`,
-      code: err.code,
+    finish(() => {
+      socket.destroy();
+      if (err instanceof BlockedTargetError) return sendError(res, err, 'Destino no permitido');
+      res.status(502).json({
+        error: `La conexión TLS a ${host}:${sslPort} falló: ${String(err.message).slice(0, 160)}`,
+        code: err.code,
+      });
     });
   });
 
   socket.on('timeout', () => {
-    socket.destroy();
-    res.status(504).json({
-      error: `Tiempo de espera agotado al conectar a ${host}:${port}`,
+    finish(() => {
+      socket.destroy();
+      res.status(504).json({ error: `Tiempo de espera agotado al conectar a ${host}:${sslPort}` });
     });
   });
-});
+}));
 
 // -------------------------------------------------------------
-// 6. Certificate Transparency (CT Logs) API (Nuevo)
-// Consulta gratuita a crt.sh para subdominios y certificados emitidos
+// 6. Certificate Transparency (CT Logs) API
+// Consulta crt.sh. Caché de 5 min + deduplicación de peticiones concurrentes (crt.sh es lento
+// y tiene límites), y tope de tamaño de respuesta (dominios grandes devuelven decenas de MB).
 // -------------------------------------------------------------
-app.get('/api/ct-logs', async (req: Request, res: Response) => {
-  const domain = cleanHost(req.query.domain as string);
-
-  if (!domain) {
-    return res.status(400).json({ error: 'El dominio es obligatorio' });
+app.get('/api/ct-logs', asyncHandler(async (req: Request, res: Response) => {
+  const parsed = parseHost(req.query.domain);
+  if (!parsed || parsed.kind !== 'domain') {
+    return res.status(400).json({ error: 'Introduzca un nombre de dominio válido (no una dirección IP).' });
   }
-
+  const domain = parsed.host;
   const startTime = Date.now();
 
   try {
-    // Consulta crt.sh en formato JSON
-    const crtUrl = `https://crt.sh/?q=${encodeURIComponent(domain)}&output=json`;
-    const resp = await fetch(crtUrl, {
-      headers: {
-        'User-Agent': 'NetCheck/1.0 (Network Tools Hub; CT Logs Query)',
-        Accept: 'application/json',
-      },
-      signal: AbortSignal.timeout(9000),
-    });
-
-    if (!resp.ok) {
-      throw new Error(`crt.sh respondió con código de estado HTTP ${resp.status}`);
-    }
-
-    const data: any[] = await resp.json();
-
-    // Deduplicar certificados y extraer subdominios únicos
-    const subdomainsSet = new Set<string>();
-    const certsMap = new Map<string, any>();
-
-    (data || []).forEach((item) => {
-      const nameVal = item.name_value || '';
-      nameVal.split('\n').forEach((n: string) => {
-        const clean = n.trim().toLowerCase();
-        if (clean && clean.includes(domain)) {
-          subdomainsSet.add(clean);
-        }
-      });
-
-      const key = `${item.serial_number}-${item.issuer_name}`;
-      if (!certsMap.has(key)) {
-        certsMap.set(key, {
-          id: item.id,
-          loggedAt: item.entry_timestamp,
-          notBefore: item.not_before,
-          notAfter: item.not_after,
-          commonName: item.common_name,
-          issuerName: item.issuer_name,
-          serialNumber: item.serial_number,
-          subdomains: Array.from(new Set(nameVal.split('\n').map((s: string) => s.trim()))).filter(Boolean),
-        });
-      }
-    });
-
-    const certList = Array.from(certsMap.values()).slice(0, 50); // limitar a los 50 más relevantes
-    const subdomains = Array.from(subdomainsSet).sort();
-
-    res.json({
-      domain,
-      totalFound: data.length,
-      uniqueCertificates: certsMap.size,
-      discoveredSubdomains: subdomains.length,
-      subdomains,
-      certificates: certList,
-      durationMs: Date.now() - startTime,
-    });
+    const { rawEntries: _raw, ...payload } = await fetchCtPayload(domain);
+    res.json({ ...payload, durationMs: Date.now() - startTime });
   } catch (err: any) {
-    res.status(500).json({
-      error: `Error al consultar logs de Transparencia de Certificados (crt.sh): ${err.message}`,
+    if (err instanceof ResponseTooLargeError) {
+      return res.status(413).json({
+        error: 'Este dominio tiene demasiados certificados registrados para consultarlo completo. Pruebe con un subdominio concreto.',
+        domain,
+      });
+    }
+    res.status(502).json({
+      error: `Error al consultar logs de Transparencia de Certificados (crt.sh): ${String(err?.message || 'sin respuesta').slice(0, 160)}`,
       domain,
     });
   }
-});
+}));
 
 // -------------------------------------------------------------
 // 7. HTTP Headers & Security Analyzer API
+// Cliente HTTP propio (safeHeadRequest): solo destinos públicos, cada redirección se revalida,
+// IP validada = IP conectada, y el cuerpo de la respuesta nunca se descarga.
 // -------------------------------------------------------------
-app.get('/api/headers', async (req: Request, res: Response) => {
-  let targetUrl = (req.query.url as string || '').trim();
+app.get('/api/headers', heavyLimiter, asyncHandler(async (req: Request, res: Response) => {
+  const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+  if (!rawUrl) return res.status(400).json({ error: 'La URL es obligatoria' });
+  if (rawUrl.length > 2048) return res.status(400).json({ error: 'La URL es demasiado larga' });
 
-  if (!targetUrl) {
-    return res.status(400).json({ error: 'La URL es obligatoria' });
-  }
-
-  if (!/^https?:\/\//i.test(targetUrl)) {
-    targetUrl = 'https://' + targetUrl;
-  }
-
+  const targetUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
   const startTime = Date.now();
 
   try {
-    const fetchResp = await fetch(targetUrl, {
-      method: 'GET',
-      redirect: 'follow',
-      headers: {
-        'User-Agent': 'NetCheck/1.0 (Network Tools Hub; Diagnostic Crawler)',
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-      signal: AbortSignal.timeout(8000),
-    });
-
-    const durationMs = Date.now() - startTime;
-    const rawHeaders: Record<string, string> = {};
-    fetchResp.headers.forEach((val, key) => {
-      rawHeaders[key.toLowerCase()] = val;
-    });
-
-    // Auditoría de Seguridad
-    const securityAudit: {
-      name: string;
-      header: string;
-      present: boolean;
-      value: string | null;
-      score: number;
-      maxScore: number;
-      status: 'pass' | 'warning' | 'missing';
-      recommendation: string;
-    }[] = [];
-
-    // HSTS
-    const hsts = rawHeaders['strict-transport-security'];
-    securityAudit.push({
-      name: 'Strict-Transport-Security (HSTS)',
-      header: 'strict-transport-security',
-      present: Boolean(hsts),
-      value: hsts || null,
-      score: hsts ? (hsts.includes('includeSubDomains') ? 20 : 15) : 0,
-      maxScore: 20,
-      status: hsts ? 'pass' : 'missing',
-      recommendation: hsts ? 'HSTS está activo y previene ataques de degradación de protocolo.' : 'Habilite Strict-Transport-Security para forzar a los navegadores a conectarse solo mediante HTTPS.',
-    });
-
-    // CSP
-    const csp = rawHeaders['content-security-policy'];
-    securityAudit.push({
-      name: 'Content-Security-Policy (CSP)',
-      header: 'content-security-policy',
-      present: Boolean(csp),
-      value: csp || null,
-      score: csp ? 25 : 0,
-      maxScore: 25,
-      status: csp ? 'pass' : 'missing',
-      recommendation: csp ? 'CSP configurado contra inyecciones XSS y scripts no autorizados.' : 'Defina Content-Security-Policy para mitigar inyecciones de código malicioso y cross-site scripting.',
-    });
-
-    // X-Frame-Options
-    const xfo = rawHeaders['x-frame-options'];
-    securityAudit.push({
-      name: 'X-Frame-Options',
-      header: 'x-frame-options',
-      present: Boolean(xfo),
-      value: xfo || null,
-      score: xfo ? 15 : 0,
-      maxScore: 15,
-      status: xfo ? 'pass' : 'missing',
-      recommendation: xfo ? `Protección anti-clickjacking activa (${xfo}).` : 'Configure X-Frame-Options (DENY o SAMEORIGIN) para prevenir ataques de clickjacking mediante iframes.',
-    });
-
-    // X-Content-Type-Options
-    const xcto = rawHeaders['x-content-type-options'];
-    securityAudit.push({
-      name: 'X-Content-Type-Options',
-      header: 'x-content-type-options',
-      present: Boolean(xcto),
-      value: xcto || null,
-      score: xcto && xcto.toLowerCase().includes('nosniff') ? 15 : 0,
-      maxScore: 15,
-      status: xcto ? 'pass' : 'missing',
-      recommendation: xcto ? 'Prevención de detección de tipos MIME activa (nosniff).' : 'Establezca X-Content-Type-Options: nosniff para impedir que el navegador interprete archivos con tipos MIME incorrectos.',
-    });
-
-    // Referrer-Policy
-    const refPol = rawHeaders['referrer-policy'];
-    securityAudit.push({
-      name: 'Referrer-Policy',
-      header: 'referrer-policy',
-      present: Boolean(refPol),
-      value: refPol || null,
-      score: refPol ? 15 : 0,
-      maxScore: 15,
-      status: refPol ? 'pass' : 'missing',
-      recommendation: refPol ? `Política de referencia definida (${refPol}).` : 'Configure Referrer-Policy para limitar la información de navegación enviada a sitios de terceros.',
-    });
-
-    // Permissions-Policy
-    const permPol = rawHeaders['permissions-policy'];
-    securityAudit.push({
-      name: 'Permissions-Policy',
-      header: 'permissions-policy',
-      present: Boolean(permPol),
-      value: permPol || null,
-      score: permPol ? 10 : 0,
-      maxScore: 10,
-      status: permPol ? 'pass' : 'missing',
-      recommendation: permPol ? 'Permisos de APIs del navegador restringidos de forma explícita.' : 'Defina Permissions-Policy para restringir acceso a cámara, micrófono y geolocalización.',
-    });
-
-    const totalEarned = securityAudit.reduce((acc, curr) => acc + curr.score, 0);
-    const totalMax = securityAudit.reduce((acc, curr) => acc + curr.maxScore, 0);
-    const percentage = Math.round((totalEarned / totalMax) * 100);
-
-    let grade = 'F';
-    if (percentage >= 90) grade = 'A+';
-    else if (percentage >= 80) grade = 'A';
-    else if (percentage >= 65) grade = 'B';
-    else if (percentage >= 50) grade = 'C';
-    else if (percentage >= 35) grade = 'D';
-
+    const r = await safeHeadRequest(targetUrl, { timeoutMs: 8000 });
     res.json({
       url: targetUrl,
-      finalUrl: fetchResp.url,
-      statusCode: fetchResp.status,
-      statusText: fetchResp.statusText,
-      durationMs,
-      headers: rawHeaders,
-      securityScore: percentage,
-      securityGrade: grade,
-      securityAudit,
+      finalUrl: r.finalUrl,
+      statusCode: r.status,
+      statusText: r.statusText,
+      durationMs: Date.now() - startTime,
+      headers: r.headers,
+      ...analyzeSecurityHeaders(r.headers),
     });
-  } catch (err: any) {
-    res.status(500).json({
-      error: `Error al obtener encabezados HTTP de '${targetUrl}': ${err.message}`,
-      url: targetUrl,
-    });
+  } catch (err) {
+    sendError(res, err, 'No se pudieron obtener los encabezados HTTP del destino', { url: targetUrl });
   }
-});
+}));
 
 // -------------------------------------------------------------
-// 8. HTTP/2 & HTTP/3 Support Checker API (Nuevo)
-// Prueba ALPN TLS (h2, http/1.1) y analiza Alt-Svc para HTTP/3 (QUIC)
+// 8. HTTP/2 & HTTP/3 Support Checker API
+// Prueba ALPN TLS (h2, http/1.1) y analiza Alt-Svc / registro DNS HTTPS para HTTP/3 (QUIC)
 // -------------------------------------------------------------
-app.get('/api/http-versions', (req: Request, res: Response) => {
-  const host = cleanHost(req.query.host as string);
-
-  if (!host) {
-    return res.status(400).json({ error: 'El host es obligatorio' });
+app.get('/api/http-versions', heavyLimiter, asyncHandler(async (req: Request, res: Response) => {
+  let host: string;
+  try {
+    host = await requirePublicHost(req.query.host);
+  } catch (err) {
+    return sendError(res, err, 'El host indicado no es válido');
   }
 
   const startTime = Date.now();
+  let settled = false;
+  const finish = (fn: () => void) => {
+    if (settled) return;
+    settled = true;
+    fn();
+  };
 
-  // Socket TLS con ALPN para consultar soporte HTTP/2
   const socket = tls.connect(
     {
       host,
       port: 443,
-      servername: host,
+      servername: net.isIP(host) ? undefined : host,
       ALPNProtocols: ['h2', 'http/1.1'],
       rejectUnauthorized: false,
       timeout: 5000,
+      lookup: safeLookup,
     },
-    async () => {
+    () => {
       const alpnProtocol = socket.alpnProtocol;
       const durationMs = Date.now() - startTime;
       socket.destroy();
 
-      // Comprobar HTTP/3 mediante consulta al encabezado Alt-Svc
-      let hasHttp3 = false;
-      let altSvcHeader: string | null = null;
-
-      try {
-        const resp = await fetch(`https://${host}`, {
-          method: 'HEAD',
-          headers: { 'User-Agent': 'NetCheck/1.0 (HTTP/3 Probe)' },
-          signal: AbortSignal.timeout(4000),
-        });
-
-        altSvcHeader = resp.headers.get('alt-svc');
-        if (altSvcHeader && (altSvcHeader.includes('h3=') || altSvcHeader.includes('h3-'))) {
-          hasHttp3 = true;
-        }
-      } catch {
-        // Ignorar si HEAD falla
-      }
-
-      // Probar registros DNS HTTPS para confirmación ALPN h3 / h2
-      try {
-        const dohResp = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=HTTPS`, {
-          headers: { 'Accept': 'application/dns-json' },
+      // Alt-Svc (cabeceras) y registro DNS HTTPS se consultan en paralelo (antes: en serie)
+      const urlHost = net.isIPv6(host) ? `[${host}]` : host;
+      Promise.all([
+        safeHeadRequest(`https://${urlHost}`, { timeoutMs: 4000, maxRedirects: 0 }).catch(() => null),
+        fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=HTTPS`, {
+          headers: { Accept: 'application/dns-json' },
           signal: AbortSignal.timeout(3000),
-        });
-        if (dohResp.ok) {
-          const dohData: any = await dohResp.json();
-          const answers = dohData.Answer || [];
-          for (const ans of answers) {
-            const dataStr = String(ans.data || '');
-            if (dataStr.includes('h3')) {
-              hasHttp3 = true;
-            }
-          }
+        })
+          .then((r) => (r.ok ? readJsonLimited<any>(r, 256 * 1024) : null))
+          .catch(() => null),
+      ]).then(([head, doh]) => {
+        const altSvcHeader: string | null = head?.headers['alt-svc'] ?? null;
+        let hasHttp3 = Boolean(altSvcHeader && (altSvcHeader.includes('h3=') || altSvcHeader.includes('h3-')));
+        for (const ans of doh?.Answer || []) {
+          if (String(ans.data || '').includes('h3')) hasHttp3 = true;
         }
-      } catch {
-        // Ignorar fallo de DoH
-      }
+        const supportsHttp2 = alpnProtocol === 'h2';
 
-      const supportsHttp1 = true;
-      const supportsHttp2 = alpnProtocol === 'h2';
-
-      res.json({
-        host,
-        durationMs,
-        negotiatedProtocol: alpnProtocol || 'http/1.1',
-        supports: {
-          http1: supportsHttp1,
-          http2: supportsHttp2,
-          http3: hasHttp3,
-        },
-        protocols: [
-          {
-            name: 'HTTP/1.1',
-            supported: true,
-            transport: 'TCP / TLS',
-            statusText: 'Soportado universalmente',
-          },
-          {
-            name: 'HTTP/2 (h2)',
-            supported: supportsHttp2,
-            transport: 'TCP / TLS ALPN',
-            statusText: supportsHttp2 ? 'Activo (Multiplexación y compresión HPACK)' : 'No negociado en ALPN',
-          },
-          {
-            name: 'HTTP/3 (QUIC)',
-            supported: hasHttp3,
-            transport: 'UDP / QUIC',
-            statusText: hasHttp3 ? `Publicitado en Alt-Svc (${altSvcHeader})` : 'No publicitado en Alt-Svc',
-          },
-        ],
-        altSvc: altSvcHeader,
+        finish(() =>
+          res.json({
+            host,
+            durationMs,
+            negotiatedProtocol: alpnProtocol || 'http/1.1',
+            supports: { http1: true, http2: supportsHttp2, http3: hasHttp3 },
+            protocols: [
+              { name: 'HTTP/1.1', supported: true, transport: 'TCP / TLS', statusText: 'Soportado universalmente' },
+              {
+                name: 'HTTP/2 (h2)',
+                supported: supportsHttp2,
+                transport: 'TCP / TLS ALPN',
+                statusText: supportsHttp2 ? 'Activo (Multiplexación y compresión HPACK)' : 'No negociado en ALPN',
+              },
+              {
+                name: 'HTTP/3 (QUIC)',
+                supported: hasHttp3,
+                transport: 'UDP / QUIC',
+                statusText: hasHttp3 ? `Publicitado en Alt-Svc (${altSvcHeader ?? 'registro DNS HTTPS'})` : 'No publicitado en Alt-Svc',
+              },
+            ],
+            altSvc: altSvcHeader,
+          })
+        );
       });
     }
   );
 
-  socket.on('error', (err) => {
-    socket.destroy();
-    res.status(502).json({
-      error: `Error al probar negociación de versiones HTTP en ${host}: ${err.message}`,
-      host,
+  socket.on('error', (err: any) => {
+    finish(() => {
+      socket.destroy();
+      if (err instanceof BlockedTargetError) return sendError(res, err, 'Destino no permitido');
+      res.status(502).json({
+        error: `Error al probar la negociación de versiones HTTP en ${host}: ${String(err.message).slice(0, 160)}`,
+        host,
+      });
     });
   });
 
   socket.on('timeout', () => {
-    socket.destroy();
-    res.status(504).json({
-      error: `Tiempo de espera agotado probando ALPN en ${host}`,
-      host,
+    finish(() => {
+      socket.destroy();
+      res.status(504).json({ error: `Tiempo de espera agotado probando ALPN en ${host}`, host });
     });
   });
-});
+}));
 
 // -------------------------------------------------------------
 // 9. Visual Traceroute API (Nuevo)
 // Integración con API pública comunitaria Globalping (gratuita, sin keys)
 // con fallback a saltos de latencia de red
 // -------------------------------------------------------------
-app.get('/api/traceroute', async (req: Request, res: Response) => {
-  const target = cleanHost(req.query.target as string);
+const TRACE_REGIONS = new Set(['EU', 'NA', 'AS', 'SA', 'OC', 'AF', 'WORLD', 'MUNDIAL']);
+
+app.get('/api/traceroute', tracerouteLimiter, asyncHandler(async (req: Request, res: Response) => {
+  let target: string;
+  try {
+    target = await requirePublicHost(req.query.target); // evita usar la cuota de Globalping contra destinos privados/inválidos
+  } catch (err) {
+    return sendError(res, err, 'El destino indicado no es válido');
+  }
   const rawLimit = req.query.limit ? parseInt(req.query.limit as string, 10) : 3;
   const limit = Math.min(5, Math.max(1, isNaN(rawLimit) ? 3 : rawLimit));
-  const region = ((req.query.region as string) || 'EU').trim();
-
-  if (!target) {
-    return res.status(400).json({ error: 'El host o IP de destino es obligatorio' });
+  const region = (typeof req.query.region === 'string' ? req.query.region : 'EU').trim();
+  if (!TRACE_REGIONS.has(region.toUpperCase())) {
+    return res.status(400).json({ error: 'Región no admitida. Use EU, NA, AS, SA, OC, AF o world.' });
   }
 
   const startTime = Date.now();
@@ -1184,8 +952,8 @@ app.get('/api/traceroute', async (req: Request, res: Response) => {
 
       // Consultar resultado esperando que todas las sondas finalicen
       let pollData: any = null;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 3000 : 1500));
+      for (let attempt = 0; attempt < 9; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 1500 : 1000));
         const pollResp = await fetch(`https://api.globalping.io/v1/measurements/${measurementId}`, {
           headers: { 'User-Agent': 'NetCheck/1.0' },
           signal: AbortSignal.timeout(5000),
@@ -1296,62 +1064,17 @@ app.get('/api/traceroute', async (req: Request, res: Response) => {
     // Continuar con resolución de saltos asistida
   }
 
-  // Fallback: Generar trazado de ruta diagnóstico con resolución de saltos IP
-  try {
-    const resolvedIp = await dns.promises.lookup(target).then((r) => r.address).catch(() => target);
-    const simulatedHops = [
-      { hop: 1, ip: '10.0.0.1', hostname: 'gateway.local', rttMs: 1.2, loss: false },
-      { hop: 2, ip: '192.168.1.254', hostname: 'core-router.net', rttMs: 3.4, loss: false },
-      { hop: 3, ip: '195.66.225.1', hostname: 'edge-ixp.transit.net', rttMs: 8.7, loss: false },
-      { hop: 4, ip: '141.101.65.1', hostname: 'as13335.cloudflare.com', rttMs: 14.2, loss: false },
-      { hop: 5, ip: resolvedIp, hostname: target, rttMs: 18.5, loss: false },
-    ];
-
-    const fallbackProbe = {
-      id: 'local-probe-1',
-      probe: {
-        city: 'Falkenstein',
-        country: 'DE',
-        continent: 'EU',
-        region: 'Western Europe',
-        asn: 24940,
-        network: 'Hetzner Online',
-      },
-      destination: {
-        ip: resolvedIp,
-        country: 'US',
-        org: 'Wikimedia Foundation',
-        asn: 14907,
-      },
-      stats: {
-        timeMs: 18.5,
-        totalHops: simulatedHops.length,
-      },
-      rawOutput: `traceroute to ${target} (${resolvedIp}), 20 hops max, 60 byte packets\n 1  _gateway (10.0.0.1)  1.200 ms  1.180 ms\n 2  core-router.net (192.168.1.254)  3.400 ms  3.380 ms\n 3  edge-ixp.transit.net (195.66.225.1)  8.700 ms  8.680 ms\n 4  as13335.cloudflare.com (141.101.65.1)  14.200 ms  14.180 ms\n 5  ${target} (${resolvedIp})  18.500 ms  18.480 ms`,
-      hops: simulatedHops,
-    };
-
-    res.json({
-      target,
-      provider: 'Diagnóstico de Ruta Red Globalping',
-      probeLocation: 'Falkenstein',
-      probeCountry: 'DE',
-      totalHops: simulatedHops.length,
-      durationMs: Date.now() - startTime,
-      hops: simulatedHops,
-      note: 'Ruta analizada mediante punto de sondeo comunitario',
-      probes: [fallbackProbe],
-    });
-  } catch (err: any) {
-    res.status(500).json({
-      error: `Error al ejecutar traceroute hacia ${target}: ${err.message}`,
-      target,
-    });
-  }
-});
+  // Antes aquí se fabricaba un trazado falso (saltos 10.0.0.1, 192.168.1.254, "Hetzner", "Wikimedia"...)
+  // que se mostraba al usuario como si fuera real. Ahora se informa del fallo con honestidad.
+  res.status(502).json({
+    error: 'El servicio de trazado (Globalping) no está disponible o no devolvió resultados. Inténtelo de nuevo en unos minutos.',
+    target,
+  });
+}));
 
 // -------------------------------------------------------------
 // 10. Port Checker API
+// Resuelve el host UNA vez, comprueba que sea público y conecta por IP: sin rebinding y 1 DNS por escaneo.
 // -------------------------------------------------------------
 const COMMON_PORTS = [
   { port: 21, service: 'FTP', protocol: 'TCP' },
@@ -1373,124 +1096,94 @@ const COMMON_PORTS = [
   { port: 8443, service: 'HTTPS Alt', protocol: 'TCP' },
 ];
 
-function checkSinglePort(host: string, port: number, timeoutMs = 3000): Promise<{
-  port: number;
-  open: boolean;
-  durationMs: number;
-  status: 'OPEN' | 'CLOSED' | 'FILTERED';
-}> {
-  return new Promise(async (resolve) => {
+type PortStatus = 'OPEN' | 'CLOSED' | 'FILTERED';
+
+function checkSinglePort(
+  ip: string,
+  portNumber: number,
+  timeoutMs = 3000
+): Promise<{ port: number; open: boolean; durationMs: number; status: PortStatus }> {
+  return new Promise((resolve) => {
     const startTime = Date.now();
-    let targetIp = host;
-
-    try {
-      if (!net.isIP(host)) {
-        const resolved = await dns.promises.lookup(host);
-        if (resolved && resolved.address) {
-          targetIp = resolved.address;
-        }
-      }
-    } catch {
-      // continuar con host original si falla dns.lookup
-    }
-
     const socket = new net.Socket();
+    let done = false;
+    const finish = (status: PortStatus) => {
+      if (done) return;
+      done = true;
+      socket.destroy();
+      resolve({ port: portNumber, open: status === 'OPEN', durationMs: Date.now() - startTime, status });
+    };
+
     socket.setTimeout(timeoutMs);
-
-    socket.on('connect', () => {
-      const duration = Date.now() - startTime;
-      socket.destroy();
-      resolve({ port, open: true, durationMs: duration, status: 'OPEN' });
-    });
-
-    socket.on('timeout', () => {
-      const duration = Date.now() - startTime;
-      socket.destroy();
-      resolve({ port, open: false, durationMs: duration, status: 'FILTERED' });
-    });
-
-    socket.on('error', (err: any) => {
-      const duration = Date.now() - startTime;
-      socket.destroy();
-      if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') {
-        resolve({ port, open: false, durationMs: duration, status: 'CLOSED' });
-      } else {
-        resolve({ port, open: false, durationMs: duration, status: 'FILTERED' });
-      }
-    });
-
-    socket.connect(port, targetIp);
+    socket.once('connect', () => finish('OPEN'));
+    socket.once('timeout', () => finish('FILTERED'));
+    // Solo ECONNREFUSED prueba "cerrado". Antes ENOTFOUND también contaba como CLOSED (falso: ni siquiera se llegó al host).
+    socket.once('error', (err: NodeJS.ErrnoException) => finish(err.code === 'ECONNREFUSED' ? 'CLOSED' : 'FILTERED'));
+    socket.connect(portNumber, ip);
   });
 }
 
-app.get('/api/port-check', async (req: Request, res: Response) => {
-  const host = cleanHost(req.query.host as string);
-  const customPort = req.query.port ? parseInt(req.query.port as string, 10) : null;
+app.get('/api/port-check', portScanLimiter, asyncHandler(async (req: Request, res: Response) => {
+  const parsedHost = parseHost(req.query.host);
+  if (!parsedHost) {
+    return res.status(400).json({ error: 'El host o dirección IP es obligatorio o no es válido' });
+  }
+  const host = parsedHost.host;
 
-  if (!host) {
-    return res.status(400).json({ error: 'El host o dirección IP es obligatorio' });
+  const hasCustomPort = req.query.port !== undefined && req.query.port !== '';
+  const customPort = hasCustomPort ? parsePort(req.query.port) : null;
+  if (hasCustomPort && customPort === null) {
+    return res.status(400).json({ error: 'El puerto debe estar entre 1 y 65535' });
   }
 
+  let ip: string;
   try {
-    if (customPort && !isNaN(customPort)) {
-      if (customPort < 1 || customPort > 65535) {
-        return res.status(400).json({ error: 'El puerto debe estar entre 1 y 65535' });
-      }
+    ip = (await resolvePublicAddress(host)).address;
+  } catch (err) {
+    return sendError(res, err, 'No se pudo comprobar el host indicado', { host });
+  }
 
-      const foundService = COMMON_PORTS.find((p) => p.port === customPort);
-      const result = await checkSinglePort(host, customPort, 3500);
-
-      return res.json({
-        host,
-        results: [
-          {
-            ...result,
-            service: foundService ? foundService.service : 'Servicio Personalizado',
-            protocol: foundService ? foundService.protocol : 'TCP',
-          },
-        ],
-        summary: {
-          total: 1,
-          open: result.open ? 1 : 0,
-          closed: result.status === 'CLOSED' ? 1 : 0,
-          filtered: result.status === 'FILTERED' ? 1 : 0,
-        },
-      });
-    }
-
-    const scanPromises = COMMON_PORTS.map(async (def) => {
-      const r = await checkSinglePort(host, def.port, 2200);
-      return {
-        ...r,
-        service: def.service,
-        protocol: def.protocol,
-      };
-    });
-
-    const results = await Promise.all(scanPromises);
-
-    res.json({
+  if (customPort !== null) {
+    const foundService = COMMON_PORTS.find((p) => p.port === customPort);
+    const result = await checkSinglePort(ip, customPort, 3500);
+    return res.json({
       host,
-      results,
+      results: [
+        {
+          ...result,
+          service: foundService ? foundService.service : 'Servicio Personalizado',
+          protocol: foundService ? foundService.protocol : 'TCP',
+        },
+      ],
       summary: {
-        total: results.length,
-        open: results.filter((r) => r.open).length,
-        closed: results.filter((r) => r.status === 'CLOSED').length,
-        filtered: results.filter((r) => r.status === 'FILTERED').length,
+        total: 1,
+        open: result.open ? 1 : 0,
+        closed: result.status === 'CLOSED' ? 1 : 0,
+        filtered: result.status === 'FILTERED' ? 1 : 0,
       },
     });
-  } catch (err: any) {
-    res.status(500).json({
-      error: `Error al comprobar puertos en ${host}: ${err.message}`,
-      host,
-    });
   }
-});
+
+  const results = await Promise.all(
+    COMMON_PORTS.map(async (def) => ({ ...(await checkSinglePort(ip, def.port, 2200)), service: def.service, protocol: def.protocol }))
+  );
+
+  res.json({
+    host,
+    results,
+    summary: {
+      total: results.length,
+      open: results.filter((r) => r.open).length,
+      closed: results.filter((r) => r.status === 'CLOSED').length,
+      filtered: results.filter((r) => r.status === 'FILTERED').length,
+    },
+  });
+}));
 
 // -------------------------------------------------------------
 // 11. Whois & RDAP Lookup API (Con Fallback Multirregistro)
 // -------------------------------------------------------------
-app.get('/api/whois', async (req: Request, res: Response) => {
+app.get('/api/whois', asyncHandler(async (req: Request, res: Response) => {
   const query = cleanHost(req.query.query as string);
 
   if (!query) {
@@ -1594,96 +1287,161 @@ app.get('/api/whois', async (req: Request, res: Response) => {
       query,
     });
   }
-});
+}));
 
 // -------------------------------------------------------------
 // 12. Speed Test Endpoints (Ping, Download, Upload)
+// Protegidos con: concurrencia por IP/total, presupuesto de bytes por IP y tope de subida.
 // -------------------------------------------------------------
-const RANDOM_SPEED_CHUNK = crypto.randomBytes(64 * 1024); // Pre-almacenar 64KB aleatorios para alto rendimiento sin CPU overhead
+const RANDOM_SPEED_CHUNK = crypto.randomBytes(64 * 1024); // 64 KB aleatorios pre-generados: ancho de banda alto sin coste de CPU
+const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
+const NO_STORE = 'no-store, no-cache, must-revalidate, max-age=0';
 
-app.get('/api/speedtest/ping', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+const downloadBytes = (req: Request) => {
+  const n = parseInt(req.query.bytes as string, 10);
+  return Math.min(Math.max(!isNaN(n) ? n : 5 * 1024 * 1024, 64 * 1024), MAX_DOWNLOAD_BYTES);
+};
+const speedConcurrency = concurrencyLimit({ perIp: 6, total: 40 });
+const downloadBudget = bandwidthBudget({ windowMs: 10 * 60_000, maxBytes: 2 * 1024 ** 3, bytesOf: downloadBytes });
+
+app.get('/api/speedtest/ping', (_req, res) => {
+  res.setHeader('Cache-Control', NO_STORE);
   res.setHeader('Pragma', 'no-cache');
   res.json({ pong: true, time: Date.now() });
 });
 
-app.get('/api/speedtest/download', (req, res) => {
-  const reqBytes = parseInt(req.query.bytes as string, 10);
-  const totalBytes = Math.min(Math.max(!isNaN(reqBytes) ? reqBytes : 5 * 1024 * 1024, 64 * 1024), 25 * 1024 * 1024);
+app.get('/api/speedtest/download', speedConcurrency, downloadBudget, (req, res) => {
+  const totalBytes = downloadBytes(req);
 
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Length', totalBytes.toString());
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Cache-Control', NO_STORE);
   res.setHeader('Pragma', 'no-cache');
 
   let bytesSent = 0;
+  let closed = false;
+  res.on('close', () => {
+    closed = true; // el cliente cortó: dejar de escribir
+  });
+
   const sendChunk = () => {
-    while (bytesSent < totalBytes) {
-      const remaining = totalBytes - bytesSent;
-      const chunkSize = Math.min(remaining, RANDOM_SPEED_CHUNK.length);
+    while (!closed && bytesSent < totalBytes) {
+      const chunkSize = Math.min(totalBytes - bytesSent, RANDOM_SPEED_CHUNK.length);
       const slice = chunkSize === RANDOM_SPEED_CHUNK.length ? RANDOM_SPEED_CHUNK : RANDOM_SPEED_CHUNK.subarray(0, chunkSize);
       bytesSent += chunkSize;
-      const ok = res.write(slice);
-      if (!ok) {
+      if (!res.write(slice)) {
         res.once('drain', sendChunk);
         return;
       }
     }
-    res.end();
+    if (!closed) res.end();
   };
 
   sendChunk();
 });
 
-app.post('/api/speedtest/upload', (req, res) => {
+app.post('/api/speedtest/upload', speedConcurrency, (req, res) => {
   const startTime = Date.now();
-  let receivedBytes = 0;
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
+    res.setHeader('Connection', 'close');
+    return res.status(413).json({ error: `Tamaño máximo de subida: ${MAX_UPLOAD_BYTES / 1024 / 1024} MB` });
+  }
 
-  req.on('data', (chunk) => {
+  let receivedBytes = 0;
+  let aborted = false;
+
+  req.on('data', (chunk: Buffer) => {
     receivedBytes += chunk.length;
+    if (receivedBytes > MAX_UPLOAD_BYTES && !aborted) {
+      aborted = true; // Content-Length ausente o falsificado (chunked): cortar igualmente
+      res.setHeader('Connection', 'close');
+      res.status(413).json({ error: `Tamaño máximo de subida: ${MAX_UPLOAD_BYTES / 1024 / 1024} MB` });
+      req.destroy();
+    }
   });
 
   req.on('end', () => {
+    if (aborted) return;
     const durationMs = Math.max(1, Date.now() - startTime);
-    const mbps = ((receivedBytes * 8) / (durationMs / 1000) / 1000000);
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
-    res.json({
-      receivedBytes,
-      durationMs,
-      mbps: Math.round(mbps * 100) / 100,
-    });
+    const mbps = (receivedBytes * 8) / (durationMs / 1000) / 1_000_000;
+    res.setHeader('Cache-Control', NO_STORE);
+    res.json({ receivedBytes, durationMs, mbps: Math.round(mbps * 100) / 100 });
   });
 
-  req.on('error', (err) => {
-    res.status(500).json({ error: err.message });
+  req.on('error', () => {
+    if (!res.headersSent) res.status(400).json({ error: 'La subida se interrumpió' });
   });
 });
 
+// -------------------------------------------------------------
+// Montaje: API 404 → estáticos (producción) o Vite (desarrollo) → manejador global de errores
+// -------------------------------------------------------------
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'Endpoint no encontrado' });
+});
 
-// -------------------------------------------------------------
-// Montaje del servidor Vite en Dev o Estático en Prod
-// -------------------------------------------------------------
 async function startServer() {
-  if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+  if (isProd) {
+    const dist = path.resolve(__dirname, 'dist');
+    // Archivos de configuración de Cloudflare Pages: no son contenido público de este servidor
+    app.get(['/_headers', '/_redirects'], (_req, res) => res.status(404).end());
+    app.use(
+      express.static(dist, {
+        index: false,
+        setHeaders: (res, filePath) => {
+          // Los assets de Vite llevan hash en el nombre: cacheables un año. El resto (sw.js, manifest...) se revalida.
+          res.setHeader(
+            'Cache-Control',
+            filePath.includes(`${path.sep}assets${path.sep}`) ? 'public, max-age=31536000, immutable' : 'no-cache'
+          );
+        },
+      })
+    );
+    app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(path.join(dist, 'index.html'));
     });
   } else {
+    // Import dinámico: en producción Vite ni se carga (arranque más rápido y puede ser devDependency)
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: process.env.DISABLE_HMR !== 'true',
-      },
+      server: { middlewareMode: true, hmr: process.env.DISABLE_HMR !== 'true' },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   }
 
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Network Tools Hub backend escuchando en puerto ${port}`);
+  // Último recurso: nunca devolver trazas ni mensajes internos al cliente
+  app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {
+    console.error('[error no controlado]', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Error interno del servidor' });
   });
+
+  const host = process.env.HOST || '0.0.0.0';
+  const server = app.listen(port, host, () => {
+    console.log(`Network Tools Hub escuchando en http://${host}:${port} (${isProd ? 'producción' : 'desarrollo'})`);
+  });
+
+  // Mitigación de clientes lentos (slowloris)
+  server.headersTimeout = 20_000;
+  server.requestTimeout = 60_000;
+  server.keepAliveTimeout = 65_000;
+
+  // Cierre ordenado (Cloud Run, Docker, systemd envían SIGTERM)
+  const shutdown = () => {
+    console.log('Cerrando servidor…');
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 10_000).unref();
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
 
 startServer().catch((err) => {
   console.error('Error fatal al iniciar servidor:', err);

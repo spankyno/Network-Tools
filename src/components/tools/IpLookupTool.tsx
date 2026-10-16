@@ -21,6 +21,12 @@ import {
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
+// Leaflet inserta el contenido de los popups con innerHTML. Los campos de la geolocalización (ciudad, ISP, org...)
+// proceden de terceros y, en el caso de org/isp, de registros que controla el titular de la IP:
+// SIEMPRE hay que escaparlos (XSS almacenado → ejecutado al consultar la IP del atacante).
+const escapeHtml = (value: unknown): string =>
+  String(value ?? '').replace(/[&<>"'`]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' })[c] as string);
+
 const EXAMPLES = ['1.1.1.1', '8.8.8.8', '208.67.222.222', '140.82.121.4'];
 
 interface IpLookupToolProps {
@@ -175,13 +181,13 @@ export const IpLookupTool: React.FC<IpLookupToolProps> = ({
     const popupHtml = `
       <div style="padding: 4px 2px; min-width: 170px;">
         <div style="font-weight: 700; font-size: 13px; color: #f8fafc; margin-bottom: 3px;">
-          ${data.city || 'Ubicación'}${data.country ? `, ${data.country}` : ''}
+          ${escapeHtml(data.city || 'Ubicación')}${data.country ? `, ${escapeHtml(data.country)}` : ''}
         </div>
         <div style="font-family: monospace; font-size: 12px; color: #38bdf8; margin-bottom: 2px;">
-          ${data.ip} (${data.version || 'IPv4'})
+          ${escapeHtml(data.ip)} (${escapeHtml(data.version || 'IPv4')})
         </div>
         <div style="font-size: 11px; color: #94a3b8;">
-          ${data.isp || data.org || ''}
+          ${escapeHtml(data.isp || data.org || '')}
         </div>
         <div style="font-family: monospace; font-size: 10px; color: #64748b; margin-top: 4px; border-top: 1px solid #334155; padding-top: 3px;">
           ${!isZeroCoords ? `${lat.toFixed(4)}, ${lon.toFixed(4)}` : 'Ubicación regional'}

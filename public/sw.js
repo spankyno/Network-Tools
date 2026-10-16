@@ -1,10 +1,28 @@
-const CACHE_NAME = 'netcheck-cache-v4';
+const CACHE_NAME = 'netcheck-cache-v5';
+const MAX_RUNTIME_ENTRIES = 300; // teselas de mapa y fuentes: sin tope la caché crecía indefinidamente
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/manifest.webmanifest',
+  '/theme-init.js',
   '/icon.svg',
 ];
+
+// Coincidencia exacta o por subdominio real (antes se usaba includes(), que aceptaba "evil-openstreetmap.org.attacker.com")
+const ALLOWED_HOSTS = [
+  'fonts.googleapis.com',
+  'fonts.gstatic.com',
+  'tile.openstreetmap.org',
+  'tile.openstreetmap.fr',
+  'basemaps.cartocdn.com',
+];
+
+async function trimCache(cache, max) {
+  const keys = await cache.keys();
+  if (keys.length > max) {
+    await Promise.all(keys.slice(0, keys.length - max).map((k) => cache.delete(k)));
+  }
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -68,12 +86,7 @@ self.addEventListener('fetch', (event) => {
 
   // Solo cachear recursos de nuestro mismo origen o CDNs reconocidas (Leaflet, fuentes, etc.)
   const isSameOrigin = url.origin === self.location.origin;
-  const isAllowedCdn =
-    url.hostname.includes('unpkg.com') ||
-    url.hostname.includes('fonts.googleapis.com') ||
-    url.hostname.includes('fonts.gstatic.com') ||
-    url.hostname.includes('openstreetmap.org') ||
-    url.hostname.includes('basemaps.cartocdn.com');
+  const isAllowedCdn = ALLOWED_HOSTS.some((h) => url.hostname === h || url.hostname.endsWith('.' + h));
 
   if (!isSameOrigin && !isAllowedCdn) {
     return;
@@ -93,9 +106,12 @@ self.addEventListener('fetch', (event) => {
           ) {
             const responseClone = networkResponse.clone();
             caches.open(CACHE_NAME).then((cache) => {
-              cache.put(event.request, responseClone).catch(() => {
-                // Silenciar de forma segura cualquier fallo de almacenamiento en caché
-              });
+              cache
+                .put(event.request, responseClone)
+                .then(() => trimCache(cache, MAX_RUNTIME_ENTRIES))
+                .catch(() => {
+                  // Silenciar de forma segura cualquier fallo de almacenamiento en caché
+                });
             }).catch(() => {});
           }
           return networkResponse;

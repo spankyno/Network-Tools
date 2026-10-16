@@ -189,6 +189,9 @@ export interface SslResponse {
   fingerprint: string;
   subjectAltNames: string[];
   chain: CertChainItem[];
+  /** true cuando el backend no pudo inspeccionar el TLS en vivo (despliegue Edge): datos parciales. */
+  limited?: boolean;
+  notice?: string;
 }
 
 // 7. Certificate Transparency (CT Logs) Types
@@ -322,6 +325,8 @@ export interface PortCheckResponse {
     closed: number;
     filtered: number;
   };
+  /** Aviso cuando el backend no pudo sondear algunos puertos por restricciones de la plataforma (Edge). */
+  notice?: string;
 }
 
 // 12. Speed Test Types

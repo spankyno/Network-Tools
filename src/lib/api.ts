@@ -19,20 +19,38 @@ const getApiBase = () => {
   return '';
 };
 
-async function handleFetch<T>(endpoint: string): Promise<T> {
-  const base = getApiBase();
-  const url = `${base}${endpoint}`;
-  const response = await fetch(url);
-  const contentType = response.headers.get('content-type');
+/** Error de la API con el código HTTP, para decidir si tiene sentido reintentar (los 4xx no lo tienen). */
+export class ApiError extends Error {
+  constructor(message: string, public status: number = 0) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+async function handleFetch<T>(endpoint: string, signal?: AbortSignal): Promise<T> {
+  const url = `${getApiBase()}${endpoint}`;
+  // Plazo máximo siempre; si el llamador aporta su propia señal (p. ej. la de React Query) se combinan.
+  const timeout = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+  } catch (err: any) {
+    if (err?.name === 'TimeoutError') throw new ApiError('La solicitud tardó demasiado en responder. Inténtelo de nuevo.', 504);
+    if (err?.name === 'AbortError') throw err; // cancelada por el llamador: no es un fallo
+    throw new ApiError('No se pudo conectar con el servidor. Compruebe su conexión.', 0);
+  }
+
+  const contentType = response.headers.get('content-type');
   if (!contentType || !contentType.includes('application/json')) {
     const text = await response.text();
-    throw new Error(`Error de conexión con el servidor (${response.status}): ${text.slice(0, 80)}`);
+    throw new ApiError(`Error de conexión con el servidor (${response.status}): ${text.slice(0, 80)}`, response.status);
   }
 
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(data.error || `La solicitud falló con código ${response.status}`);
+    throw new ApiError(data.error || `La solicitud falló con código ${response.status}`, response.status);
   }
   return data as T;
 }
@@ -56,38 +74,8 @@ export async function fetchWhois(query: string): Promise<WhoisResponse> {
 }
 
 export async function fetchIp(ip?: string): Promise<IpResponse> {
-  if (!ip) {
-    try {
-      const resp = await fetch('https://ipwho.is/', { signal: AbortSignal.timeout(4000) });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.success !== false) {
-          return {
-            ip: data.ip,
-            version: data.type === 'IPv6' ? 'IPv6' : 'IPv4',
-            country: data.country || 'Desconocido',
-            countryCode: data.country_code || '',
-            region: data.region || '',
-            regionCode: data.region_code || '',
-            city: data.city || 'Desconocida',
-            zip: data.postal || '',
-            lat: typeof data.latitude === 'number' ? data.latitude : 0,
-            lon: typeof data.longitude === 'number' ? data.longitude : 0,
-            timezone: data.timezone?.id || 'UTC',
-            isp: data.connection?.isp || data.connection?.org || 'Desconocido',
-            org: data.connection?.org || '',
-            as: data.connection?.asn ? `AS${data.connection.asn} ${data.connection.org || ''}` : '',
-            isMobile: false,
-            isProxy: Boolean(data.security?.is_proxy || data.security?.is_vpn),
-            isHosting: Boolean(data.security?.is_datacenter),
-            providerUsed: 'ipwho.is (Client Direct)',
-          };
-        }
-      }
-    } catch {
-      // fallback to backend API
-    }
-  }
+  // Antes, sin IP indicada, el NAVEGADOR consultaba directamente a ipwho.is (tercero), filtrando la IP del usuario
+  // sin pasar por el backend y sin que lo recogiera la política de privacidad. Ahora todo pasa por /api/ip.
   const query = ip ? `?ip=${encodeURIComponent(ip)}` : '';
   return handleFetch<IpResponse>(`/api/ip${query}`);
 }

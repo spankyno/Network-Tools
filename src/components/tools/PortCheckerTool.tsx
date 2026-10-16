@@ -5,6 +5,7 @@ import { PortCheckResponse, ToolId } from '../../types/network';
 import { saveHistoryItem } from '../../lib/history';
 import { useToast } from '../Toast';
 import { Server, Search, RefreshCw, Copy, Check, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { LimitedNotice } from '../LimitedNotice';
 
 const EXAMPLES = ['github.com', 'cloudflare.com', 'google.com'];
 
@@ -185,6 +186,7 @@ export const PortCheckerTool: React.FC<PortCheckerToolProps> = ({
       {/* Resultados */}
       {data && !isLoading && (
         <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          <LimitedNotice message={data.notice} />
           {/* Métricas y Resumen */}
           <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div className="flex items-center gap-4 flex-wrap">

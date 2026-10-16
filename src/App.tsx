@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { Suspense, lazy, useState, useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToolId, HistoryItem } from './types/network';
 import { getHistory } from './lib/history';
+import { ApiError } from './lib/api';
 import { ToastProvider } from './components/Toast';
 import { Header } from './components/Header';
 import { HistoryModal } from './components/HistoryModal';
@@ -11,19 +12,20 @@ import { AboutPage } from './components/AboutPage';
 import { PrivacyPage } from './components/PrivacyPage';
 import { TOOL_REGISTRY, getToolDefinition } from './tools/registry';
 
-// Componentes de las 11 Herramientas
-import { DnsLookupTool } from './components/tools/DnsLookupTool';
-import { DnsPropagationTool } from './components/tools/DnsPropagationTool';
-import { DnssecTool } from './components/tools/DnssecTool';
-import { SslCheckerTool } from './components/tools/SslCheckerTool';
-import { CtLogsTool } from './components/tools/CtLogsTool';
-import { HttpHeadersTool } from './components/tools/HttpHeadersTool';
-import { HttpVersionsTool } from './components/tools/HttpVersionsTool';
-import { IpLookupTool } from './components/tools/IpLookupTool';
-import { TracerouteTool } from './components/tools/TracerouteTool';
-import { PortCheckerTool } from './components/tools/PortCheckerTool';
-import { WhoisLookupTool } from './components/tools/WhoisLookupTool';
-import { SpeedTestTool } from './components/tools/SpeedTestTool';
+
+// Cada herramienta se carga bajo demanda (antes: un único bundle de ~608 kB con Leaflet incluido para todos)
+const DnsLookupTool = lazy(() => import('./components/tools/DnsLookupTool').then((m) => ({ default: m.DnsLookupTool })));
+const DnsPropagationTool = lazy(() => import('./components/tools/DnsPropagationTool').then((m) => ({ default: m.DnsPropagationTool })));
+const DnssecTool = lazy(() => import('./components/tools/DnssecTool').then((m) => ({ default: m.DnssecTool })));
+const SslCheckerTool = lazy(() => import('./components/tools/SslCheckerTool').then((m) => ({ default: m.SslCheckerTool })));
+const CtLogsTool = lazy(() => import('./components/tools/CtLogsTool').then((m) => ({ default: m.CtLogsTool })));
+const HttpHeadersTool = lazy(() => import('./components/tools/HttpHeadersTool').then((m) => ({ default: m.HttpHeadersTool })));
+const HttpVersionsTool = lazy(() => import('./components/tools/HttpVersionsTool').then((m) => ({ default: m.HttpVersionsTool })));
+const IpLookupTool = lazy(() => import('./components/tools/IpLookupTool').then((m) => ({ default: m.IpLookupTool })));
+const TracerouteTool = lazy(() => import('./components/tools/TracerouteTool').then((m) => ({ default: m.TracerouteTool })));
+const PortCheckerTool = lazy(() => import('./components/tools/PortCheckerTool').then((m) => ({ default: m.PortCheckerTool })));
+const WhoisLookupTool = lazy(() => import('./components/tools/WhoisLookupTool').then((m) => ({ default: m.WhoisLookupTool })));
+const SpeedTestTool = lazy(() => import('./components/tools/SpeedTestTool').then((m) => ({ default: m.SpeedTestTool })));
 
 import { ArrowLeft, Activity, ExternalLink } from 'lucide-react';
 
@@ -33,10 +35,24 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,
-      retry: 2,
+      // Antes: retry 2 para TODO → un error de validación (4xx) o un límite de ritmo (429) se repetía 3 veces,
+      // triplicando la carga en las rutas más caras (escaneo de puertos, traceroute). Solo se reintentan fallos transitorios.
+      retry: (failureCount, error) => {
+        if (error instanceof ApiError && error.status >= 400 && error.status < 500) return false;
+        return failureCount < 1;
+      },
+      staleTime: 60_000, // volver a una consulta reciente no vuelve a golpear el backend
     },
   },
 });
+
+function ToolLoading() {
+  return (
+    <div className="flex items-center justify-center py-16 text-slate-400 text-sm" role="status" aria-live="polite">
+      <Activity className="w-4 h-4 mr-2 animate-pulse" /> Cargando herramienta…
+    </div>
+  );
+}
 
 function MainApp() {
   const [activeTool, setActiveTool] = useState<AppView>('home');
@@ -187,6 +203,7 @@ function MainApp() {
             </div>
 
             {/* Vista de la Herramienta Activa */}
+            <Suspense fallback={<ToolLoading />}>
             {activeTool === 'dns' && (
               <DnsLookupTool
                 initialQuery={currentQuery || 'cloudflare.com'}
@@ -260,6 +277,7 @@ function MainApp() {
                 onRunQuery={handleQueryExecuted}
               />
             )}
+            </Suspense>
           </div>
         )}
       </main>

@@ -11,7 +11,7 @@ Sigue estos sencillos pasos para compilar y desplegar la aplicación directament
 ### Paso 1: Conectar el repositorio en Cloudflare
 1. Entra a tu panel de control de Cloudflare: [dash.cloudflare.com](https://dash.cloudflare.com/).
 2. En el menú lateral izquierdo, haz clic en **Workers & Pages** (o **Pages**).
-3. Haz clic en el botón azul **Create application** (Crear aplicación). 
+3. Haz clic en el botón azul **Create application** (Crear aplicación).
 4. Selecciona la pestaña **Pages** y haz clic en **Connect to Git** (Conectar a Git).
 5. Autoriza tu cuenta de GitHub (si aún no lo has hecho) y selecciona el repositorio de Network Tools Hub.
 
@@ -74,4 +74,40 @@ npm run build
 
 # Comprobación de tipos TypeScript
 npm run lint
+
+# Tests (validación SSRF, redirecciones, límites, historial, backend Edge)
+npm test
+
+# Servidor Node en producción (tras `npm run build`)
+npm start
 ```
+
+---
+
+## 🔐 Seguridad y despliegue
+
+La app ejecuta conexiones de red **a petición de usuarios anónimos**, así que está diseñada para impedir su abuso:
+
+- **Solo destinos públicos.** `shared/net-utils.ts` bloquea loopback, redes privadas, link-local (metadatos cloud `169.254.169.254`), CGNAT, multicast, formas ambiguas (`127.1`, `2130706433`, `::ffff:127.0.0.1`…) y nombres `.local/.internal`.
+- **Anti DNS-rebinding (Node).** La IP validada es la IP a la que conecta el socket (`server/security.ts › safeLookup`).
+- **Redirecciones revalidadas** salto a salto en `/api/headers`.
+- **Rate limiting** por IP, límites de concurrencia y de ancho de banda en el speed test, y topes de tamaño.
+- **Cabeceras de seguridad y CSP** definidas una sola vez en `shared/headers.ts` (se genera `public/_headers` en cada build).
+
+| Variable | Dónde | Para qué |
+| :--- | :--- | :--- |
+| `TRUST_PROXY` | Node | Nº de proxies de confianza. **Obligatoria tras un proxy/CDN.** |
+| `ALLOWED_ORIGINS` | Node y Cloudflare | Orígenes CORS permitidos (vacío = solo mismo origen). |
+
+### Dos backends, capacidades distintas
+
+| Herramienta | Node (`npm start`) | Cloudflare Pages Functions |
+| :--- | :--- | :--- |
+| SSL/TLS | Handshake real: protocolo, cifrado, huellas, cadena | **Parcial**: fechas/emisor/SAN desde logs CT + conexión HTTPS verificada. Se avisa en la UI. |
+| Puertos | TCP real | TCP real vía `cloudflare:sockets`; no puede sondear IPs de Cloudflare ni algunos puertos (se avisa). |
+| HTTP/2 | ALPN real | Solo si lo anuncia el registro DNS HTTPS (sin ALPN en el Edge). |
+
+> Para inspección TLS completa en producción, use el despliegue Node (Cloud Run, Fly.io, un VPS…).
+
+### Recomendado en Cloudflare
+Cree una regla de **Rate Limiting (WAF)** sobre `/api/*`: el limitador en memoria de las Functions es por *isolate* y solo es de mejor esfuerzo.
