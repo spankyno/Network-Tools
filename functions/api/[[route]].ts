@@ -3,7 +3,6 @@
 // Limitaciones reales del runtime (no hay sockets TLS ni ALPN): donde un dato no se puede verificar
 // aquí NO se inventa; se devuelve parcial con `limited`/`notice` o se informa del fallo.
 import {
-  FixedWindowLimiter,
   ResponseTooLargeError,
   TtlCache,
   analyzeSecurityHeaders,
@@ -16,6 +15,21 @@ import {
   readJsonLimited,
 } from '../../shared/net-utils.ts';
 import { lookupGeo } from '../../shared/geo.ts';
+import { FallbackRateStore, MemoryRateStore, takeFrom, type RateStore } from '../../shared/rate-limit.ts';
+import { DurableObjectRateStore } from '../../shared/rate-limit-do.ts';
+import {
+  CAPTCHA_REQUIRED_BODY,
+  HUMAN_GATED_PATHS,
+  PASS_COOKIE,
+  PASS_TTL_SEC,
+  parseCookie,
+  passCookie,
+  signPass,
+  turnstileEnabled,
+  verifyPass,
+  verifyTurnstileToken,
+  type TurnstileConfig,
+} from '../../shared/turnstile.ts';
 import { fetchCtPayload } from '../../shared/ct.ts';
 import { HttpError, assertPublicEdge, requireHostParam, resolveEdge, safeFetchEdge, tcpProbe, urlHost } from '../../shared/edge.ts';
 
@@ -55,13 +69,27 @@ function jsonResponse(data: any, status: number = 200, extraHeaders?: Record<str
   });
 }
 
-// Límites en memoria por isolate (mejor esfuerzo). El control real debe hacerse con reglas de
-// Rate Limiting de Cloudflare (WAF) sobre /api/*: ver docs de seguridad.
-const generalLimiter = new FixedWindowLimiter(60_000, 120);
-const heavyLimiter = new FixedWindowLimiter(60_000, 20);
-const portLimiter = new FixedWindowLimiter(60_000, 8);
-const traceLimiter = new FixedWindowLimiter(60_000, 6);
+// Límites de ritmo. Con el binding RATE_LIMITER (Durable Object, ver workers/rate-limiter) son GLOBALES y
+// estrictamente consistentes; sin él, o si el DO falla, caen a memoria por isolate (solo mejor esfuerzo).
 const HEAVY_PATHS = new Set(['/api/ssl', '/api/headers', '/api/http-versions']);
+const memoryStore = new MemoryRateStore();
+const doStores = new WeakMap<object, RateStore>();
+function rateStoreFor(env: any): RateStore {
+  const ns = env?.RATE_LIMITER;
+  if (!ns || typeof ns.idFromName !== 'function') return memoryStore;
+  let st = doStores.get(ns);
+  if (!st) {
+    st = new FallbackRateStore(new DurableObjectRateStore(ns), memoryStore);
+    doStores.set(ns, st);
+  }
+  return st;
+}
+
+const turnstileCfg = (env: any): TurnstileConfig => ({
+  secret: String(env?.TURNSTILE_SECRET_KEY ?? '').trim() || undefined,
+  siteKey: String(env?.TURNSTILE_SITE_KEY ?? '').trim() || undefined,
+  signingKey: String(env?.PASS_SIGNING_KEY ?? '').trim() || undefined,
+});
 
 export async function onRequest(context: any): Promise<Response> {
   const req: Request = context.request;
@@ -89,20 +117,59 @@ export async function onRequest(context: any): Promise<Response> {
 
   if (req.method === 'OPTIONS') return finish(new Response(null, { status: 204 }));
   const isUpload = url.pathname === '/api/speedtest/upload';
-  if (req.method !== 'GET' && !(req.method === 'POST' && isUpload)) {
+  const isVerify = url.pathname === '/api/turnstile/verify';
+  if (req.method !== 'GET' && !(req.method === 'POST' && (isUpload || isVerify))) {
     return finish(jsonResponse({ error: 'Método no permitido' }, 405, { Allow: 'GET, POST, OPTIONS' }));
   }
 
   const ip = req.headers.get('cf-connecting-ip') || 'unknown';
-  const limiters: Array<{ l: FixedWindowLimiter; msg: string }> = [];
-  if (!url.pathname.startsWith('/api/speedtest')) limiters.push({ l: generalLimiter, msg: 'Demasiadas solicitudes.' });
-  if (HEAVY_PATHS.has(url.pathname)) limiters.push({ l: heavyLimiter, msg: 'Demasiadas comprobaciones activas.' });
-  if (url.pathname === '/api/port-check') limiters.push({ l: portLimiter, msg: 'Límite de comprobaciones de puertos alcanzado.' });
-  if (url.pathname === '/api/traceroute') limiters.push({ l: traceLimiter, msg: 'Límite de trazados alcanzado.' });
-  for (const { l, msg } of limiters) {
-    const r = l.take(ip);
+  const store = rateStoreFor(context.env);
+  const limits: Array<{ name: string; windowMs: number; max: number; msg: string }> = [];
+  if (!url.pathname.startsWith('/api/speedtest')) limits.push({ name: 'general', windowMs: 60_000, max: 120, msg: 'Demasiadas solicitudes.' });
+  if (HEAVY_PATHS.has(url.pathname)) limits.push({ name: 'heavy', windowMs: 60_000, max: 20, msg: 'Demasiadas comprobaciones activas.' });
+  if (url.pathname === '/api/port-check') limits.push({ name: 'ports', windowMs: 60_000, max: 8, msg: 'Límite de comprobaciones de puertos alcanzado.' });
+  if (url.pathname === '/api/traceroute') limits.push({ name: 'trace', windowMs: 60_000, max: 6, msg: 'Límite de trazados alcanzado.' });
+  if (isVerify) limits.push({ name: 'verify', windowMs: 60_000, max: 10, msg: 'Demasiados intentos de verificación.' });
+  for (const l of limits) {
+    const r = await takeFrom(store, `${l.name}|${ip}`, l.windowMs, l.max);
     if (!r.allowed) {
-      return finish(jsonResponse({ error: `${msg} Reintente en ${r.retryAfterSec} s.` }, 429, { 'Retry-After': String(r.retryAfterSec) }));
+      return finish(jsonResponse({ error: `${l.msg} Reintente en ${r.retryAfterSec} s.` }, 429, { 'Retry-After': String(r.retryAfterSec) }));
+    }
+  }
+
+  // Configuración pública y verificación de Turnstile
+  const ts = turnstileCfg(context.env);
+  if (url.pathname === '/api/config') {
+    return finish(jsonResponse({ turnstileSiteKey: turnstileEnabled(ts) ? ts.siteKey : null }));
+  }
+  if (isVerify) {
+    if (!turnstileEnabled(ts)) return finish(jsonResponse({ ok: true, disabled: true }));
+    let token: unknown;
+    try {
+      const raw = await req.text();
+      token = raw.length <= 4096 ? JSON.parse(raw)?.token : undefined;
+    } catch {
+      token = undefined;
+    }
+    const result = await verifyTurnstileToken(ts.secret!, token, ip);
+    if (!result.success) {
+      return finish(
+        jsonResponse(
+          {
+            error: result.unreachable ? 'No se pudo contactar con el servicio de verificación. Inténtelo de nuevo.' : 'La verificación anti-bots falló. Inténtelo de nuevo.',
+            code: result.unreachable ? 'CAPTCHA_UNAVAILABLE' : 'CAPTCHA_FAILED',
+          },
+          result.unreachable ? 503 : 403
+        )
+      );
+    }
+    return finish(jsonResponse({ ok: true, expiresIn: PASS_TTL_SEC }, 200, { 'Set-Cookie': passCookie(await signPass(ts, ip), true) }));
+  }
+
+  // Rutas pesadas: exigen pase de Turnstile si está configurado
+  if (turnstileEnabled(ts) && HUMAN_GATED_PATHS.has(url.pathname)) {
+    if (!(await verifyPass(ts, parseCookie(req.headers.get('Cookie'), PASS_COOKIE), ip))) {
+      return finish(jsonResponse(CAPTCHA_REQUIRED_BODY, 403));
     }
   }
 

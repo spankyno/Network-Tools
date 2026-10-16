@@ -3,7 +3,20 @@ import http from 'node:http';
 import https from 'node:https';
 import type net from 'node:net';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import { FixedWindowLimiter, isBlockedHostname, isIP, isPublicIp, parseHost } from '../shared/net-utils.ts';
+import { isBlockedHostname, isIP, isPublicIp, parseHost } from '../shared/net-utils.ts';
+import { takeFrom, type RateStore } from '../shared/rate-limit.ts';
+import {
+  CAPTCHA_REQUIRED_BODY,
+  PASS_COOKIE,
+  PASS_TTL_SEC,
+  parseCookie,
+  passCookie,
+  signPass,
+  turnstileEnabled,
+  verifyPass,
+  verifyTurnstileToken,
+  type TurnstileConfig,
+} from '../shared/turnstile.ts';
 
 // ---------------------------------------------------------------------------
 // Errores tipados
@@ -217,10 +230,10 @@ export const asyncHandler =
 // ---------------------------------------------------------------------------
 // Rate limiting y límite de concurrencia
 // ---------------------------------------------------------------------------
-export function rateLimit(opts: { windowMs: number; max: number; message?: string }): RequestHandler {
-  const limiter = new FixedWindowLimiter(opts.windowMs, opts.max);
-  return (req, res, next) => {
-    const r = limiter.take(req.ip || req.socket.remoteAddress || 'unknown');
+export function rateLimit(opts: { name: string; store: RateStore; windowMs: number; max: number; message?: string }): RequestHandler {
+  return async (req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const r = await takeFrom(opts.store, `${opts.name}|${ip}`, opts.windowMs, opts.max);
     res.setHeader('RateLimit-Limit', String(opts.max));
     res.setHeader('RateLimit-Remaining', String(r.remaining));
     if (!r.allowed) {
@@ -261,29 +274,60 @@ export function concurrencyLimit(opts: { perIp: number; total: number }): Reques
 }
 
 /** Tope de bytes servidos por IP y ventana (protege la factura de ancho de banda del speed test). */
-export function bandwidthBudget(opts: { windowMs: number; maxBytes: number; bytesOf: (req: Request) => number }): RequestHandler {
-  const used = new Map<string, { bytes: number; reset: number }>();
-  return (req, res, next) => {
-    const now = Date.now();
-    if (used.size > 10_000) {
-      for (const [k, v] of used) if (v.reset <= now) used.delete(k);
-      if (used.size > 10_000) used.clear();
-    }
-    const key = req.ip || req.socket.remoteAddress || 'unknown';
-    let entry = used.get(key);
-    if (!entry || entry.reset <= now) {
-      entry = { bytes: 0, reset: now + opts.windowMs };
-      used.set(key, entry);
-    }
-    const wanted = opts.bytesOf(req);
-    if (entry.bytes + wanted > opts.maxBytes) {
-      res.setHeader('Retry-After', String(Math.ceil((entry.reset - now) / 1000)));
+export function bandwidthBudget(opts: { store: RateStore; windowMs: number; maxBytes: number; bytesOf: (req: Request) => number }): RequestHandler {
+  return async (req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    // strict: una petición rechazada NO gasta presupuesto
+    const r = await opts.store.hit(`bw|${ip}`, opts.windowMs, opts.bytesOf(req), { max: opts.maxBytes, strict: true });
+    if (!r.applied) {
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil(r.resetMs / 1000))));
       res.status(429).json({ error: 'Cuota de transferencia del test de velocidad agotada temporalmente. Inténtelo más tarde.' });
       return;
     }
-    entry.bytes += wanted;
     next();
   };
+}
+
+// ---------------------------------------------------------------------------
+// Turnstile (CAPTCHA) + pase firmado
+// ---------------------------------------------------------------------------
+export function turnstileConfigFromEnv(env: NodeJS.ProcessEnv = process.env): TurnstileConfig {
+  return {
+    secret: env.TURNSTILE_SECRET_KEY?.trim() || undefined,
+    siteKey: env.TURNSTILE_SITE_KEY?.trim() || undefined,
+    signingKey: env.PASS_SIGNING_KEY?.trim() || undefined,
+  };
+}
+
+const clientIp = (req: Request) => req.ip || req.socket.remoteAddress || 'unknown';
+
+/** Exige un pase válido. Con Turnstile desactivado deja pasar (la app funciona sin claves). */
+export function humanGate(cfg: TurnstileConfig): RequestHandler {
+  return asyncHandler(async (req, res, next) => {
+    if (!turnstileEnabled(cfg)) return next();
+    const pass = parseCookie(req.headers.cookie, PASS_COOKIE);
+    if (await verifyPass(cfg, pass, clientIp(req))) return next();
+    res.status(403).json(CAPTCHA_REQUIRED_BODY);
+  });
+}
+
+/** POST /api/turnstile/verify  { token }  →  valida con Cloudflare y emite la cookie de pase. */
+export function turnstileVerifyHandler(cfg: TurnstileConfig, fetchImpl: typeof fetch = fetch): RequestHandler {
+  return asyncHandler(async (req, res) => {
+    if (!turnstileEnabled(cfg)) return void res.json({ ok: true, disabled: true });
+    const ip = clientIp(req);
+    const result = await verifyTurnstileToken(cfg.secret!, (req.body as any)?.token, ip, fetchImpl);
+    if (!result.success) {
+      // Cloudflare inalcanzable ≠ usuario rechazado: 503 para que el cliente pueda reintentar
+      return void res.status(result.unreachable ? 503 : 403).json({
+        error: result.unreachable ? 'No se pudo contactar con el servicio de verificación. Inténtelo de nuevo.' : 'La verificación anti-bots falló. Inténtelo de nuevo.',
+        code: result.unreachable ? 'CAPTCHA_UNAVAILABLE' : 'CAPTCHA_FAILED',
+      });
+    }
+    const secure = req.secure || process.env.NODE_ENV === 'production';
+    res.setHeader('Set-Cookie', passCookie(await signPass(cfg, ip), secure));
+    res.json({ ok: true, expiresIn: PASS_TTL_SEC });
+  });
 }
 
 // ---------------------------------------------------------------------------

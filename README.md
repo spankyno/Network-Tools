@@ -98,6 +98,31 @@ La app ejecuta conexiones de red **a petición de usuarios anónimos**, así que
 | :--- | :--- | :--- |
 | `TRUST_PROXY` | Node | Nº de proxies de confianza. **Obligatoria tras un proxy/CDN.** |
 | `ALLOWED_ORIGINS` | Node y Cloudflare | Orígenes CORS permitidos (vacío = solo mismo origen). |
+| `REDIS_URL` | Node | Límites de ritmo compartidos entre instancias. Sin él, memoria por proceso. |
+| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | Node y Cloudflare | Activa el CAPTCHA en las rutas pesadas. Sin ambas, desactivado. |
+| `PASS_SIGNING_KEY` | Node y Cloudflare | Clave propia para firmar el pase (opcional; por defecto, el secreto). |
+| `RATE_LIMITER` (binding) | Cloudflare | Durable Object para límites globales (`workers/rate-limiter`). |
+
+### Anti-automatización: Turnstile
+
+Las rutas más caras y abusables (`ssl`, `headers`, `http-versions`, `port-check`, `traceroute`) exigen haber superado un reto de
+[Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/). El usuario lo resuelve **una vez** (modal automático) y el
+servidor emite un pase firmado (HMAC-SHA256, 10 min, ligado a la IP, cookie `HttpOnly; SameSite=Strict`). No guarda estado, así que
+funciona con varias instancias sin Redis. Si Cloudflare no responde se devuelve `503` (recuperable), no un rechazo.
+
+Requisito: la API debe servirse desde el mismo origen/sitio que el frontend.
+
+### Límites de ritmo distribuidos
+
+| Entorno | Almacén | Garantía |
+| :--- | :--- | :--- |
+| Node, 1 instancia | Memoria (por defecto) | Exacto en esa instancia |
+| Node, N instancias | Redis (`REDIS_URL`, script Lua atómico) | Global y exacto entre instancias |
+| Cloudflare | Durable Object (`RATE_LIMITER`) | Global y estrictamente consistente |
+
+Si el almacén externo falla, se degrada a memoria local y se avisa una vez cada 30 s: la API sigue respondiendo y protegida (por
+instancia). El límite de **concurrencia** del speed test es por instancia a propósito (cuenta conexiones de ese proceso); el
+**presupuesto de ancho de banda** sí es global.
 
 ### Dos backends, capacidades distintas
 

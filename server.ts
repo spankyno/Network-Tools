@@ -24,11 +24,15 @@ import {
 import { SECURITY_HEADERS } from './shared/headers.ts';
 import { lookupGeo } from './shared/geo.ts';
 import { fetchCtPayload } from './shared/ct.ts';
+import { MemoryRateStore, type RateStore } from './shared/rate-limit.ts';
+import { turnstileEnabled } from './shared/turnstile.ts';
+import { createRateStore } from './server/rate-store.ts';
 import {
   BlockedTargetError,
   asyncHandler,
   bandwidthBudget,
   concurrencyLimit,
+  humanGate,
   parseAllowedOrigins,
   rateLimit,
   requirePublicHost,
@@ -37,6 +41,8 @@ import {
   safeLookup,
   securityHeaders,
   sendError,
+  turnstileConfigFromEnv,
+  turnstileVerifyHandler,
 } from './server/security.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,13 +71,30 @@ if (allowedOrigins.length > 0) {
   app.use('/api', cors({ origin: allowedOrigins, methods: ['GET', 'POST', 'OPTIONS'], maxAge: 600 }));
 }
 
+// Almacén de contadores. Arranca en memoria y startServer() lo sustituye por Redis si hay REDIS_URL;
+// con varias instancias, Redis hace que el límite sea GLOBAL (no N veces mayor). Si Redis falla, cae a memoria.
+const rateStoreRef: { current: RateStore } = { current: new MemoryRateStore() };
+const rateStore: RateStore = { hit: (...args) => rateStoreRef.current.hit(...args) };
+
 // Límites de ritmo. El speed test queda fuera del límite general (hace muchas peticiones por diseño)
-// y se protege con límite de concurrencia y presupuesto de ancho de banda.
-const generalLimiter = rateLimit({ windowMs: 60_000, max: 120 });
-const heavyLimiter = rateLimit({ windowMs: 60_000, max: 20, message: 'Demasiadas comprobaciones activas. Espere un minuto.' });
-const portScanLimiter = rateLimit({ windowMs: 60_000, max: 8, message: 'Límite de comprobaciones de puertos alcanzado. Espere un minuto.' });
-const tracerouteLimiter = rateLimit({ windowMs: 60_000, max: 6, message: 'Límite de trazados alcanzado. Espere un minuto.' });
+// y se protege con límite de concurrencia (por instancia) y presupuesto de ancho de banda (global).
+const generalLimiter = rateLimit({ name: 'general', store: rateStore, windowMs: 60_000, max: 120 });
+const heavyLimiter = rateLimit({ name: 'heavy', store: rateStore, windowMs: 60_000, max: 20, message: 'Demasiadas comprobaciones activas. Espere un minuto.' });
+const portScanLimiter = rateLimit({ name: 'ports', store: rateStore, windowMs: 60_000, max: 8, message: 'Límite de comprobaciones de puertos alcanzado. Espere un minuto.' });
+const tracerouteLimiter = rateLimit({ name: 'trace', store: rateStore, windowMs: 60_000, max: 6, message: 'Límite de trazados alcanzado. Espere un minuto.' });
+const verifyLimiter = rateLimit({ name: 'verify', store: rateStore, windowMs: 60_000, max: 10, message: 'Demasiados intentos de verificación. Espere un minuto.' });
+
+// Turnstile: desactivado si faltan TURNSTILE_SITE_KEY / TURNSTILE_SECRET_KEY
+const turnstile = turnstileConfigFromEnv();
+const humanOnly = humanGate(turnstile);
+
 app.use('/api', (req, res, next) => (req.path.startsWith('/speedtest') ? next() : generalLimiter(req, res, next)));
+
+// Configuración pública para el frontend (así un mismo build sirve con o sin Turnstile)
+app.get('/api/config', (_req, res) => {
+  res.json({ turnstileSiteKey: turnstileEnabled(turnstile) ? turnstile.siteKey : null });
+});
+app.post('/api/turnstile/verify', verifyLimiter, express.json({ limit: '4kb' }), turnstileVerifyHandler(turnstile));
 
 // -------------------------------------------------------------
 // 1. DNS Lookup API (Con Fallback en Cascada entre Proveedores)
@@ -605,7 +628,7 @@ app.get('/api/ip', asyncHandler(async (req: Request, res: Response) => {
 // rejectUnauthorized=false es deliberado: el objetivo es INSPECCIONAR también certificados
 // caducados o autofirmados. Por eso el destino se restringe a IPs públicas (safeLookup).
 // -------------------------------------------------------------
-app.get('/api/ssl', heavyLimiter, asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/ssl', heavyLimiter, humanOnly, asyncHandler(async (req: Request, res: Response) => {
   const sslPort = parsePort(req.query.port, 443); // barato: se valida antes de tocar la red
   if (sslPort === null) {
     return res.status(400).json({ error: 'El puerto debe estar entre 1 y 65535' });
@@ -778,7 +801,7 @@ app.get('/api/ct-logs', asyncHandler(async (req: Request, res: Response) => {
 // Cliente HTTP propio (safeHeadRequest): solo destinos públicos, cada redirección se revalida,
 // IP validada = IP conectada, y el cuerpo de la respuesta nunca se descarga.
 // -------------------------------------------------------------
-app.get('/api/headers', heavyLimiter, asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/headers', heavyLimiter, humanOnly, asyncHandler(async (req: Request, res: Response) => {
   const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
   if (!rawUrl) return res.status(400).json({ error: 'La URL es obligatoria' });
   if (rawUrl.length > 2048) return res.status(400).json({ error: 'La URL es demasiado larga' });
@@ -806,7 +829,7 @@ app.get('/api/headers', heavyLimiter, asyncHandler(async (req: Request, res: Res
 // 8. HTTP/2 & HTTP/3 Support Checker API
 // Prueba ALPN TLS (h2, http/1.1) y analiza Alt-Svc / registro DNS HTTPS para HTTP/3 (QUIC)
 // -------------------------------------------------------------
-app.get('/api/http-versions', heavyLimiter, asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/http-versions', heavyLimiter, humanOnly, asyncHandler(async (req: Request, res: Response) => {
   let host: string;
   try {
     host = await requirePublicHost(req.query.host);
@@ -909,7 +932,7 @@ app.get('/api/http-versions', heavyLimiter, asyncHandler(async (req: Request, re
 // -------------------------------------------------------------
 const TRACE_REGIONS = new Set(['EU', 'NA', 'AS', 'SA', 'OC', 'AF', 'WORLD', 'MUNDIAL']);
 
-app.get('/api/traceroute', tracerouteLimiter, asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/traceroute', tracerouteLimiter, humanOnly, asyncHandler(async (req: Request, res: Response) => {
   let target: string;
   try {
     target = await requirePublicHost(req.query.target); // evita usar la cuota de Globalping contra destinos privados/inválidos
@@ -1123,7 +1146,7 @@ function checkSinglePort(
   });
 }
 
-app.get('/api/port-check', portScanLimiter, asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/port-check', portScanLimiter, humanOnly, asyncHandler(async (req: Request, res: Response) => {
   const parsedHost = parseHost(req.query.host);
   if (!parsedHost) {
     return res.status(400).json({ error: 'El host o dirección IP es obligatorio o no es válido' });
@@ -1303,7 +1326,7 @@ const downloadBytes = (req: Request) => {
   return Math.min(Math.max(!isNaN(n) ? n : 5 * 1024 * 1024, 64 * 1024), MAX_DOWNLOAD_BYTES);
 };
 const speedConcurrency = concurrencyLimit({ perIp: 6, total: 40 });
-const downloadBudget = bandwidthBudget({ windowMs: 10 * 60_000, maxBytes: 2 * 1024 ** 3, bytesOf: downloadBytes });
+const downloadBudget = bandwidthBudget({ store: rateStore, windowMs: 10 * 60_000, maxBytes: 2 * 1024 ** 3, bytesOf: downloadBytes });
 
 app.get('/api/speedtest/ping', (_req, res) => {
   res.setHeader('Cache-Control', NO_STORE);
@@ -1383,6 +1406,11 @@ app.use('/api', (_req, res) => {
 });
 
 async function startServer() {
+  const rate = await createRateStore();
+  rateStoreRef.current = rate.store;
+  console.log(`Límites de ritmo: ${rate.kind === 'redis' ? 'Redis (compartidos entre instancias)' : 'memoria (por proceso)'}`);
+  console.log(`Turnstile: ${turnstileEnabled(turnstile) ? 'activado en rutas pesadas' : 'desactivado (defina TURNSTILE_SITE_KEY y TURNSTILE_SECRET_KEY)'}`);
+
   if (isProd) {
     const dist = path.resolve(__dirname, 'dist');
     // Archivos de configuración de Cloudflare Pages: no son contenido público de este servidor
@@ -1432,7 +1460,7 @@ async function startServer() {
   // Cierre ordenado (Cloud Run, Docker, systemd envían SIGTERM)
   const shutdown = () => {
     console.log('Cerrando servidor…');
-    server.close(() => process.exit(0));
+    server.close(() => void rate.close().finally(() => process.exit(0)));
     setTimeout(() => process.exit(1), 10_000).unref();
   };
   process.on('SIGTERM', shutdown);

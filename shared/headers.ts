@@ -4,16 +4,19 @@
 
 /** Origen del script de analítica propia declarado en index.html. */
 export const TRACKER_ORIGIN = 'https://aitors-hub-dashboard.asanchezgu.workers.dev';
+/** Cloudflare Turnstile: script del widget + iframe del reto. */
+export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 
 export const CSP = [
   "default-src 'self'",
-  `script-src 'self' ${TRACKER_ORIGIN}`,
+  `script-src 'self' ${TRACKER_ORIGIN} ${TURNSTILE_ORIGIN}`,
   // Tailwind/Leaflet inyectan estilos en línea; los scripts en línea siguen prohibidos.
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
   // Teselas de los tres mapas base de IpLookupTool
   "img-src 'self' data: https://tile.openstreetmap.org https://*.tile.openstreetmap.fr https://*.basemaps.cartocdn.com",
-  `connect-src 'self' https://speed.cloudflare.com ${TRACKER_ORIGIN}`,
+  `connect-src 'self' https://speed.cloudflare.com ${TRACKER_ORIGIN} ${TURNSTILE_ORIGIN}`,
+  `frame-src ${TURNSTILE_ORIGIN}`,
   "manifest-src 'self'",
   "worker-src 'self'",
   "object-src 'none'",

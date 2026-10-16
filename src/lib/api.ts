@@ -1,3 +1,4 @@
+import { ensureHumanPass } from './turnstile';
 import {
   DnsResponse,
   DnsPropagationResponse,
@@ -13,15 +14,15 @@ import {
 } from '../types/network';
 
 const getApiBase = () => {
-  if (import.meta.env.VITE_API_BASE_URL) {
-    return import.meta.env.VITE_API_BASE_URL;
+  if (import.meta.env?.VITE_API_BASE_URL) {
+    return import.meta.env?.VITE_API_BASE_URL;
   }
   return '';
 };
 
 /** Error de la API con el código HTTP, para decidir si tiene sentido reintentar (los 4xx no lo tienen). */
 export class ApiError extends Error {
-  constructor(message: string, public status: number = 0) {
+  constructor(message: string, public status: number = 0, public code?: string) {
     super(message);
     this.name = 'ApiError';
   }
@@ -29,7 +30,7 @@ export class ApiError extends Error {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-async function handleFetch<T>(endpoint: string, signal?: AbortSignal): Promise<T> {
+async function handleFetch<T>(endpoint: string, signal?: AbortSignal, retriedAfterChallenge = false): Promise<T> {
   const url = `${getApiBase()}${endpoint}`;
   // Plazo máximo siempre; si el llamador aporta su propia señal (p. ej. la de React Query) se combinan.
   const timeout = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
@@ -50,7 +51,17 @@ async function handleFetch<T>(endpoint: string, signal?: AbortSignal): Promise<T
 
   const data = await response.json();
   if (!response.ok) {
-    throw new ApiError(data.error || `La solicitud falló con código ${response.status}`, response.status);
+    // Ruta protegida con Turnstile: resolver el reto una vez y reintentar la petición original automáticamente
+    if (response.status === 403 && data.code === 'CAPTCHA_REQUIRED' && !retriedAfterChallenge) {
+      try {
+        await ensureHumanPass(getApiBase());
+      } catch (err: any) {
+        if (err?.name === 'AbortError') throw new ApiError('Verificación cancelada. Complétela para usar esta herramienta.', 403, 'CAPTCHA_CANCELLED');
+        throw new ApiError(err?.message === 'NO_TURNSTILE' ? 'El servidor exige verificación pero no está configurada.' : err?.message || 'No se pudo completar la verificación.', 403, 'CAPTCHA_FAILED');
+      }
+      return handleFetch<T>(endpoint, signal, true);
+    }
+    throw new ApiError(data.error || `La solicitud falló con código ${response.status}`, response.status, data.code);
   }
   return data as T;
 }
