@@ -1,4 +1,4 @@
-const CACHE_NAME = 'netcheck-cache-v5';
+const CACHE_NAME = 'netcheck-cache-v6';
 const MAX_RUNTIME_ENTRIES = 300; // teselas de mapa y fuentes: sin tope la caché crecía indefinidamente
 const STATIC_ASSETS = [
   '/',
@@ -116,7 +116,9 @@ self.addEventListener('fetch', (event) => {
           }
           return networkResponse;
         })
-        .catch(() => cachedResponse);
+        // Sin red y sin copia en caché hay que devolver una Response igualmente: respondWith(undefined) lanza
+        // "TypeError: Failed to convert value to 'Response'" y rompe la petición (p. ej. las teselas del mapa).
+        .catch(() => cachedResponse || Response.error());
 
       return cachedResponse || fetchPromise;
     })
