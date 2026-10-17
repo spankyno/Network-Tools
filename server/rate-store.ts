@@ -49,9 +49,11 @@ export class RedisRateStore implements RateStore {
  * REDIS_URL definida → Redis con fallback a memoria si falla. Sin ella → memoria por proceso.
  * Redis es opcional: ioredis solo se carga si se usa.
  */
-export async function createRateStore(env: NodeJS.ProcessEnv = process.env): Promise<{ store: RateStore; kind: 'redis' | 'memory'; close: () => Promise<void> }> {
+export async function createRateStore(
+  env: NodeJS.ProcessEnv = process.env
+): Promise<{ store: RateStore; kind: 'redis' | 'memory'; connected: boolean; close: () => Promise<void> }> {
   const url = env.REDIS_URL?.trim();
-  if (!url) return { store: new MemoryRateStore(), kind: 'memory', close: async () => undefined };
+  if (!url) return { store: new MemoryRateStore(), kind: 'memory', connected: false, close: async () => undefined };
 
   const { default: Redis } = await import('ioredis');
   const client = new Redis(url, {
@@ -61,10 +63,31 @@ export async function createRateStore(env: NodeJS.ProcessEnv = process.env): Pro
     commandTimeout: 1000, // el rate limit está en el camino crítico de cada petición
     lazyConnect: false,
   });
-  client.on('error', () => undefined); // los errores ya se tratan por operación en FallbackRateStore
+  let lastError = '';
+  client.on('error', (e: Error) => {
+    lastError = e.message; // los errores se tratan por operación en FallbackRateStore; aquí solo se recuerda el último
+  });
+
+  // Con enableOfflineQueue=false, las operaciones antes de conectar fallan (y caerían a memoria sin avisar).
+  // Se espera a 'ready' un tiempo acotado para que el arranque sea honesto y las primeras peticiones ya usen Redis.
+  const connected = await new Promise<boolean>((resolve) => {
+    if (client.status === 'ready') return resolve(true);
+    const timer = setTimeout(() => resolve(false), 3000);
+    client.once('ready', () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+  if (!connected) {
+    console.warn(
+      `[rate-limit] Redis no respondió en 3 s (${lastError || 'sin detalle'}). Se usa memoria local y se reintentará conectar en segundo plano.`
+    );
+  }
+
   return {
     store: new FallbackRateStore(new RedisRateStore(client as unknown as RedisLike)),
     kind: 'redis',
+    connected,
     close: async () => {
       await client.quit().catch(() => undefined);
     },

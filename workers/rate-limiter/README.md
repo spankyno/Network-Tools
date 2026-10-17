@@ -2,6 +2,10 @@
 
 Limitador distribuido para las Pages Functions. **Opcional**: sin él, las Functions usan un límite en memoria por isolate.
 
+> **Almacenamiento SQLite.** La migración usa `new_sqlite_classes`, el único backend admitido en el plan gratuito y en cuentas nuevas
+> (`new_classes` falla con *«Creating new key-value backed Durable Object namespaces is no longer supported»*). El objeto no usa la
+> API de almacenamiento: guarda el contador en memoria, así que no genera coste de almacenamiento, solo de peticiones y duración.
+
 ## Despliegue
 
 ```bash

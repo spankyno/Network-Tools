@@ -1408,7 +1408,9 @@ app.use('/api', (_req, res) => {
 async function startServer() {
   const rate = await createRateStore();
   rateStoreRef.current = rate.store;
-  console.log(`Límites de ritmo: ${rate.kind === 'redis' ? 'Redis (compartidos entre instancias)' : 'memoria (por proceso)'}`);
+  console.log(
+    `Límites de ritmo: ${rate.kind === 'memory' ? 'memoria (por proceso)' : rate.connected ? 'Redis conectado (compartidos entre instancias)' : 'Redis NO conectado → memoria local temporal'}`
+  );
   console.log(`Turnstile: ${turnstileEnabled(turnstile) ? 'activado en rutas pesadas' : 'desactivado (defina TURNSTILE_SITE_KEY y TURNSTILE_SECRET_KEY)'}`);
 
   if (isProd) {
